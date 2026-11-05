@@ -51,6 +51,18 @@ class EmbeddedBrowser(QWidget):
             nav.addWidget(w)
         nav.addWidget(self.session)
         layout.addLayout(nav)
+        actions = QHBoxLayout()
+        self.start_download = QPushButton("Start / Resume this page")
+        self.pause_download = QPushButton("Pause")
+        self.stop_download = QPushButton("Stop safely")
+        self.browser_progress = QProgressBar()
+        self.browser_status = QLabel("Sign in here, then start archiving without leaving this tab.")
+        actions.addWidget(self.start_download)
+        actions.addWidget(self.pause_download)
+        actions.addWidget(self.stop_download)
+        actions.addWidget(self.browser_progress, 1)
+        layout.addLayout(actions)
+        layout.addWidget(self.browser_status)
         self.view = QWebEngineView(self)
         self.view.setPage(QWebEnginePage(self.profile, self.view))
         layout.addWidget(self.view, 1)
@@ -152,6 +164,9 @@ class Window(QMainWindow):
         outer.addWidget(self.tabs, 1)
         self.browser = EmbeddedBrowser(self.app_dir)
         self.tabs.addTab(self.browser, "Browser & Sign-in")
+        self.browser.start_download.clicked.connect(self.start_from_browser)
+        self.browser.pause_download.clicked.connect(self.pause_task)
+        self.browser.stop_download.clicked.connect(self.stop_task)
         self.tabs.addTab(self._dashboard_tab(), "Dashboard")
         self.tabs.addTab(self._queue_tab(), "Queue & Six-list ledger")
         self.tabs.addTab(self._library_tab(), "Search & Offline library")
@@ -337,14 +352,25 @@ class Window(QMainWindow):
         self.task=Task(self.site_root,url,opts); self.task.status.connect(self.set_status)
         self.task.progress.connect(self.on_progress); self.task.page.connect(self.on_page)
         self.task.start(); self.set_status("Download started with conservative single-page requests.")
-        self.tabs.setCurrentIndex(1)
+        self.browser.browser_status.setText("Archiving this site in the background. Your sign-in tab remains open.")
+        self.tabs.setCurrentIndex(0)
+
+    def start_from_browser(self):
+        current = self.browser.view.url().toString()
+        if current.startswith(("http://", "https://")):
+            self.url.setText(current)
+        self.start_crawl()
 
     def set_status(self,text):
         self.status.setText(text); self.log.appendPlainText(text)
+        if hasattr(self, "browser"):
+            self.browser.browser_status.setText(text)
 
     def on_progress(self,current,total,url):
         self.progress.setMaximum(max(1,total)); self.progress.setValue(current)
+        self.browser.browser_progress.setMaximum(max(1,total)); self.browser.browser_progress.setValue(current)
         self.status.setText(f"{current}/{total} · {url[:110]}")
+        self.browser.browser_status.setText(f"Saved / processing {current} of {total}: {url[:120]}")
 
     def on_page(self,*_):
         self.refresh_all()
