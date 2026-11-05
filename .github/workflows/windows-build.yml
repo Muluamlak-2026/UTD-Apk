@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install
+      - name: Install minimal runtime dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
@@ -28,18 +28,18 @@ jobs:
         run: pytest -q
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
-      - name: Package application and installer
+      - name: Package compact Windows installer
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --windowed --name OfflineArchiver --collect-all playwright --collect-all bs4 --collect-all PySide6 launcher.py
+          pyinstaller --noconfirm --clean --windowed --onedir --name OfflineArchiver --collect-all playwright --collect-all bs4 --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets --exclude-module PySide6.QtPdf --exclude-module PySide6.QtPdfWidgets --exclude-module PySide6.Qt3DCore --exclude-module PySide6.Qt3DRender --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtCharts --exclude-module PySide6.QtDataVisualization --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick launcher.py
+          if (!(Test-Path "dist/OfflineArchiver/OfflineArchiver.exe")) { throw "PyInstaller output missing" }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\OfflineArchiver.iss
-          "Offline Archiver. Microsoft Edge must be installed. Data: %LOCALAPPDATA%\OfflineArchiver. Archive only content you are authorized to retain." | Out-File dist\README.txt
-          Compress-Archive -Path dist\OfflineArchiver\*,dist\README.txt -DestinationPath dist\OfflineArchiver-Windows-x64.zip
+          if (!(Test-Path "dist/OfflineArchiver-Setup-x64.exe")) { throw "Installer output missing" }
+          $size = (Get-Item "dist/OfflineArchiver-Setup-x64.exe").Length
+          "Installer size: $([math]::Round($size / 1MB, 1)) MB" | Write-Host
       - uses: actions/upload-artifact@v4
         with:
           name: OfflineArchiver-Windows-x64
-          path: |
-            dist/OfflineArchiver-Setup-x64.exe
-            dist/OfflineArchiver-Windows-x64.zip
+          path: dist/OfflineArchiver-Setup-x64.exe
           if-no-files-found: error
           retention-days: 14
