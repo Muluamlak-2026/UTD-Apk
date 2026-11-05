@@ -3,6 +3,8 @@
 A Windows desktop snapshot tool for web pages that the signed-in user is authorized to access and retain. It uses a visible Microsoft Edge session with a persistent local profile, a bounded same-host crawler, SQLite indexing, local asset storage, full-text search, retryable crawl queue, integrity verification, and portable ZIP export.
 
 ## Current capabilities
+
+Build/test status is published in the repository's Actions tab. Use only an artifact from the latest successful run for the current main commit.
 - Visible Edge sign-in session; sign in manually and complete MFA/CAPTCHA yourself.
 - Persistent local browser profile so normal sessions may remain available between runs.
 - Recursive same-host page discovery with configurable page cap, depth, and request delay.
