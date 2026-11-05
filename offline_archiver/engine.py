@@ -68,7 +68,7 @@ class Archiver:
         start_url = canonical(start_url)
         if not start_url:
             raise ValueError("Enter a valid HTTP or HTTPS URL.")
-        host = urlparse(start_url).netloc
+        seed_host = (urlparse(start_url).hostname or "").lower().removeprefix("www.")
         self.library.add_site(start_url)
         self.library.enqueue(start_url, 0)
         # Continue from the persisted queue after a normal stop or application restart.
@@ -150,7 +150,8 @@ class Archiver:
                       canvases: [...document.querySelectorAll('canvas')].map((c,i)=>({i,data:(()=>{try{return c.toDataURL('image/png')}catch(e){return null}})()})),
                       frames: [...document.querySelectorAll('iframe')].map(f=>f.src || ''),
                       scripts: [...document.scripts].map(s=>s.src || ''),
-                      forms: [...document.forms].map(f=>({action:f.action,method:f.method}))
+                      forms: [...document.forms].map(f=>({action:f.action,method:f.method})),
+                      api: performance.getEntriesByType('resource').filter(e=>e.initiatorType==='fetch'||e.initiatorType==='xmlhttprequest').map(e=>e.name)
                     })""")
                     html = page.content()
                     soup = BeautifulSoup(html, "html.parser")
@@ -181,10 +182,12 @@ class Archiver:
                         target = canonical(urljoin(final_url, raw))
                         if not target: continue
                         parsed = urlparse(target)
-                        if not include_external and parsed.netloc != host: continue
+                        target_host = (parsed.hostname or "").lower().removeprefix("www.")
+                        same_site = target_host == seed_host or target_host.endswith("." + seed_host)
+                        if not include_external and not same_site: continue
                         if excluded.search(parsed.path): continue
                         if parsed.path.lower().endswith((".pdf", ".zip", ".exe", ".dmg")): continue
-                        if depth < max_depth and self.library.enqueue(target, depth + 1):
+                        if (max_depth <= 0 or depth < max_depth) and self.library.enqueue(target, depth + 1):
                             queue.append((target, depth + 1))
                         a["href"] = target
                         links.append(target)
@@ -212,9 +215,10 @@ class Archiver:
                         soup.html["data-archive-source"] = final_url
                     notes = []
                     if live_state.get("frames"): notes.append(str(len(live_state["frames"])) + " iframe(s) may need separate capture")
+                    if live_state.get("api"): notes.append(str(len(live_state["api"])) + " fetch/XHR endpoint(s) detected; server-dependent features need offline validation")
                     if any(form.get("method", "get").lower() != "get" for form in live_state.get("forms", [])):
                         notes.append("POST form/API behavior may require the original server")
-                    external_scripts = [x for x in live_state.get("scripts", []) if x and urlparse(x).netloc != host]
+                    external_scripts = [x for x in live_state.get("scripts", []) if x and (urlparse(x).hostname or "").lower().removeprefix("www.") != seed_host]
                     if external_scripts: notes.append(str(len(external_scripts)) + " external script(s) detected; verify dependencies")
                     missing_assets = [el.get("src") or el.get("href","") for el in soup.select("script[src],img[src],link[rel=stylesheet][href]") if (el.get("src") or el.get("href","")).startswith(("http://","https://"))]
                     if missing_assets: notes.append(str(len(missing_assets)) + " remote resources remain uncaptured")
