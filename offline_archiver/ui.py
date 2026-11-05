@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -94,11 +95,11 @@ class Task(QThread):
     progress = Signal(int, int, str)
     page = Signal(int, str, str)
 
-    def __init__(self, url, opts):
+    def __init__(self, data_dir, url, opts):
         super().__init__()
-        self.url, self.opts = url, opts
+        self.data_dir, self.url, self.opts = data_dir, url, opts
         self.stop_event, self.pause_event = threading.Event(), threading.Event()
-        self.engine = Archiver(home(), self.emit_event, self.stop_event, self.pause_event)
+        self.engine = Archiver(data_dir, self.emit_event, self.stop_event, self.pause_event)
 
     def emit_event(self, kind, *args):
         if kind == "status":
@@ -126,8 +127,10 @@ class Window(QMainWindow):
         super().__init__()
         self.setWindowTitle("Offline Archiver")
         self.resize(1480, 940)
-        self.data_dir = home()
-        self.lib = Archiver(self.data_dir, lambda *a: None, threading.Event(), threading.Event()).library
+        self.app_dir = home()
+        self.site_map_path = self.app_dir / "site-storage.json"
+        self.site_root = self._site_root_for("https://www.uptodate.com")
+        self.lib = Archiver(self.site_root, lambda *a: None, threading.Event(), threading.Event()).library
         self.task: Task | None = None
         self._build_ui()
         self.refresh_all()
@@ -147,7 +150,7 @@ class Window(QMainWindow):
 
         self.tabs = QTabWidget()
         outer.addWidget(self.tabs, 1)
-        self.browser = EmbeddedBrowser(self.data_dir)
+        self.browser = EmbeddedBrowser(self.app_dir)
         self.tabs.addTab(self.browser, "Browser & Sign-in")
         self.tabs.addTab(self._dashboard_tab(), "Dashboard")
         self.tabs.addTab(self._queue_tab(), "Queue & Six-list ledger")
@@ -188,6 +191,13 @@ class Window(QMainWindow):
         form = QGridLayout()
         self.url = QLineEdit("https://www.uptodate.com/contents/table-of-contents")
         self.url.setPlaceholderText("Authorized starting URL")
+        self.storage_label = QLabel(str(self.site_root))
+        self.storage_btn = QPushButton("Choose site storage folder…")
+        self.storage_btn.clicked.connect(self.choose_site_storage)
+        self.url.editingFinished.connect(self.activate_site)
+        form.addWidget(QLabel("Site storage"),2,0)
+        form.addWidget(self.storage_label,2,1,1,4)
+        form.addWidget(self.storage_btn,2,5)
         self.pages = QSpinBox(); self.pages.setRange(1,10000); self.pages.setValue(500)
         self.depth = QSpinBox(); self.depth.setRange(0,20); self.depth.setValue(5)
         self.delay = QDoubleSpinBox(); self.delay.setRange(1,120); self.delay.setValue(5.0); self.delay.setSuffix(" sec")
@@ -266,9 +276,48 @@ class Window(QMainWindow):
         layout.addLayout(buttons)
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setPlaceholderText("Recent activity and diagnostics"); layout.addWidget(self.log,1)
         self.verify_btn.clicked.connect(self.verify_library); self.export_btn.clicked.connect(self.export)
-        self.open_archive_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir / "library"))))
+        self.open_archive_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.site_root / "library"))))
         self.report_btn.clicked.connect(self.save_report)
         return w
+
+    def _site_root_for(self, url):
+        host = (urlparse(url).hostname or "default").lower()
+        safe = re.sub(r"[^a-z0-9.-]+", "_", host)
+        try:
+            mapping = json.loads(self.site_map_path.read_text(encoding="utf-8")) if self.site_map_path.exists() else {}
+        except Exception:
+            mapping = {}
+        return Path(mapping.get(host) or (self.app_dir / "sites" / safe))
+
+    def activate_site(self):
+        url = self.url.text().strip()
+        if not url.startswith(("http://", "https://")): return
+        root = self._site_root_for(url)
+        if root.resolve() == self.site_root.resolve(): return
+        self.site_root = root
+        self.site_root.mkdir(parents=True, exist_ok=True)
+        self.lib = Archiver(self.site_root, lambda *a: None, threading.Event(), threading.Event()).library
+        self.storage_label.setText(str(self.site_root))
+        self.refresh_all()
+        self.set_status("Switched to this site's independent archive and queue.")
+
+    def choose_site_storage(self):
+        self.activate_site()
+        chosen = QFileDialog.getExistingDirectory(self, "Choose storage folder for this website", str(self.site_root))
+        if not chosen: return
+        host = (urlparse(self.url.text().strip()).hostname or "default").lower()
+        try:
+            mapping = json.loads(self.site_map_path.read_text(encoding="utf-8")) if self.site_map_path.exists() else {}
+        except Exception:
+            mapping = {}
+        mapping[host] = chosen
+        self.site_map_path.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
+        self.site_root = Path(chosen)
+        self.site_root.mkdir(parents=True, exist_ok=True)
+        self.lib = Archiver(self.site_root, lambda *a: None, threading.Event(), threading.Event()).library
+        self.storage_label.setText(str(self.site_root))
+        self.refresh_all()
+        self.set_status("Selected independent storage folder for " + host)
 
     def start_crawl(self):
         if self.task and self.task.isRunning():
@@ -284,7 +333,8 @@ class Window(QMainWindow):
             if answer != QMessageBox.Yes: self.tabs.setCurrentIndex(0); return
         opts={"max_pages":self.pages.value(),"max_depth":self.depth.value(),"delay":self.delay.value(),
               "cookies":cookies,"include_external":False}
-        self.task=Task(url,opts); self.task.status.connect(self.set_status)
+        self.activate_site()
+        self.task=Task(self.site_root,url,opts); self.task.status.connect(self.set_status)
         self.task.progress.connect(self.on_progress); self.task.page.connect(self.on_page)
         self.task.start(); self.set_status("Download started with conservative single-page requests.")
         self.tabs.setCurrentIndex(1)
@@ -342,7 +392,7 @@ class Window(QMainWindow):
     def open_page(self,row,col):
         item=self.page_table.item(row,0)
         if item:
-            path=self.data_dir/"library"/(item.data(Qt.UserRole) or "")
+            path=self.site_root/"library"/(item.data(Qt.UserRole) or "")
             if path.is_file(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def add_to_queue(self):
