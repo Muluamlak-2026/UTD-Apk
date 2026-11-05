@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QThread, Signal, QUrl
+from PySide6.QtCore import QThread, Signal, QUrl, QSettings
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import *
 
@@ -69,7 +69,8 @@ class Window(QMainWindow):
         self.setWindowTitle("Offline Archiver")
         self.resize(1240, 820)
         self.task = None
-        self.destination = default_destination()
+        self.settings = QSettings("HealthDataET", "OfflineArchiver")
+        self.destination = self.destination_for_url("")
         self.lib = Archiver(self.destination, lambda *args: None, threading.Event(), threading.Event()).library
 
         root = QWidget()
@@ -200,14 +201,18 @@ class Window(QMainWindow):
         self.task.page.connect(lambda *_: self.refresh())
         self.task.start()
 
+    def destination_for_url(self, value):
+        host = urlparse(value).netloc.lower() or "__default__"
+        saved = self.settings.value("destinations/" + host, "")
+        return Path(saved).expanduser() if saved else default_destination(value)
+
     def suggest_site_folder(self, value):
-        # Suggest a distinct destination for each host; do not overwrite a manually selected path.
-        if not getattr(self, "destination_manually_selected", False):
-            path = default_destination(value)
-            self.destination = path
-            self.destination_edit.setText(str(path))
-            self.lib = Archiver(path, lambda *args: None, threading.Event(), threading.Event()).library
-            self.refresh()
+        # Each host remembers its own user-selected folder across restarts.
+        path = self.destination_for_url(value)
+        self.destination = path
+        self.destination_edit.setText(str(path))
+        self.lib = Archiver(path, lambda *args: None, threading.Event(), threading.Event()).library
+        self.refresh()
 
     def choose_destination(self):
         current = self.destination_edit.text() or str(home())
@@ -215,7 +220,9 @@ class Window(QMainWindow):
         if selected:
             self.destination = Path(selected)
             self.destination_edit.setText(selected)
-            self.destination_manually_selected = True
+            host = urlparse(self.url.text().strip()).netloc.lower() or "__default__"
+            self.settings.setValue("destinations/" + host, selected)
+            self.settings.sync()
             self.lib = Archiver(self.destination, lambda *args: None, threading.Event(), threading.Event()).library
             self.refresh()
 
