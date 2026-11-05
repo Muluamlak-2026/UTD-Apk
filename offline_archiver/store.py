@@ -2,7 +2,8 @@ from __future__ import annotations
 import hashlib, json, mimetypes, sqlite3, threading, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse\nfrom bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
 class Library:
     def __init__(self, root: Path):
