@@ -185,6 +185,7 @@ class Archiver:
                         if soup.title else final_url, html=str(soup),
                         text=soup.get_text(" ", strip=True),
                         status=response.status if response else 0, depth=depth, links=links,
+                        incomplete=bool(asset_issues),
                     )
                     self.library.set_queue_state(url, "saved")
                     self.emit("page", saved, soup.title.get_text(" ", strip=True) if soup.title else final_url, final_url)
