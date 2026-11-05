@@ -1,4 +1,4 @@
-name: Windows build
+name: UTD-Apk · Windows desktop application
 on:
   push:
     branches: [main]
