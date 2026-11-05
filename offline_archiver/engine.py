@@ -128,6 +128,7 @@ class Archiver:
                       window.scrollTo(0,0);
                     }""")
                     page.wait_for_timeout(500)
+                    asset_bodies = {}
                     for asset_response in observed_responses:
                         try:
                             req = asset_response.request
@@ -138,20 +139,51 @@ class Archiver:
                                 continue
                             body = asset_response.body()
                             if body and len(body) <= MAX_RESOURCE_BYTES:
-                                resources[canonical(asset_response.url)] = self.library.save_asset(asset_response.url, body, mime)
+                                asset_bodies[canonical(asset_response.url)] = (body, mime)
                         except Exception as asset_error:
                             self.emit("status", "Skipped one unavailable resource: " + str(asset_error)[:180])
+                    for asset_url, (body, mime) in asset_bodies.items():
+                        resources[asset_url] = self.library.save_asset(asset_url, body, mime)
                     final_url = canonical(page.url) or url
+                    live_state = page.evaluate("""() => ({
+                      fields: [...document.querySelectorAll('input,textarea,select')].map((e,i)=>({i,value:e.value,checked:!!e.checked,type:e.type,tag:e.tagName})),
+                      canvases: [...document.querySelectorAll('canvas')].map((c,i)=>({i,data:(()=>{try{return c.toDataURL('image/png')}catch(e){return null}})()})),
+                      frames: [...document.querySelectorAll('iframe')].map(f=>f.src || ''),
+                      scripts: [...document.scripts].map(s=>s.src || ''),
+                      forms: [...document.forms].map(f=>({action:f.action,method:f.method}))
+                    })""")
                     html = page.content()
                     soup = BeautifulSoup(html, "html.parser")
+                    fields = soup.select("input,textarea,select")
+                    for state in live_state.get("fields", []):
+                        if state["i"] >= len(fields): continue
+                        element = fields[state["i"]]
+                        if state["tag"] == "INPUT" and state["type"] in ("checkbox","radio"):
+                            if state["checked"]: element["checked"] = "checked"
+                            else: element.attrs.pop("checked", None)
+                        elif state["tag"] == "TEXTAREA":
+                            element.clear()
+                            element.append(state["value"] or "")
+                        elif state["tag"] == "SELECT":
+                            for option in element.select("option"):
+                                if option.get("value") == state["value"]: option["selected"] = "selected"
+                                else: option.attrs.pop("selected", None)
+                        else:
+                            element["value"] = state["value"] or ""
+                    for state in live_state.get("canvases", []):
+                        if state.get("data") and state["i"] < len(soup.select("canvas")):
+                            image = soup.new_tag("img", src=state["data"], alt="Captured chart")
+                            soup.select("canvas")[state["i"]].replace_with(image)
                     links = []
+                    excluded = re.compile(r"/(logout|log-out|signout|sign-out|login|signin|register|password|oauth|authorize)(/|$)", re.I)
                     for a in soup.select("a[href]"):
                         raw = a.get("href", "")
                         target = canonical(urljoin(final_url, raw))
-                        if not target:
-                            continue
-                        if not include_external and urlparse(target).netloc != host:
-                            continue
+                        if not target: continue
+                        parsed = urlparse(target)
+                        if not include_external and parsed.netloc != host: continue
+                        if excluded.search(parsed.path): continue
+                        if parsed.path.lower().endswith((".pdf", ".zip", ".exe", ".dmg")): continue
                         if depth < max_depth and self.library.enqueue(target, depth + 1):
                             queue.append((target, depth + 1))
                         a["href"] = target
@@ -178,11 +210,21 @@ class Archiver:
                     # Add an archive provenance marker and preserve original URL.
                     if soup.html:
                         soup.html["data-archive-source"] = final_url
+                    notes = []
+                    if live_state.get("frames"): notes.append(str(len(live_state["frames"])) + " iframe(s) may need separate capture")
+                    if any(form.get("method", "get").lower() != "get" for form in live_state.get("forms", [])):
+                        notes.append("POST form/API behavior may require the original server")
+                    external_scripts = [x for x in live_state.get("scripts", []) if x and urlparse(x).netloc != host]
+                    if external_scripts: notes.append(str(len(external_scripts)) + " external script(s) detected; verify dependencies")
+                    missing_assets = [el.get("src") or el.get("href","") for el in soup.select("script[src],img[src],link[rel=stylesheet][href]") if (el.get("src") or el.get("href","")).startswith(("http://","https://"))]
+                    if missing_assets: notes.append(str(len(missing_assets)) + " remote resources remain uncaptured")
+                    completeness = "complete" if not notes else "partial"
                     saved = self.library.save_page(
                         url=final_url, requested_url=url, title=soup.title.get_text(" ", strip=True)
                         if soup.title else final_url, html=str(soup),
                         text=soup.get_text(" ", strip=True),
                         status=response.status if response else 0, depth=depth, links=links,
+                        completeness=completeness, completeness_notes="; ".join(notes),
                     )
                     self.library.set_queue_state(url, "saved")
                     self.emit("page", saved, soup.title.get_text(" ", strip=True) if soup.title else final_url, final_url)
