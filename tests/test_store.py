@@ -87,3 +87,21 @@ def test_queue_ledger_add_pass_reason_and_force_redownload(tmp_path: Path):
     lib.force_redownload(url, 2)
     row = lib.queue_items("pending")[0]
     assert row["depth"] == 2
+
+
+
+def test_page_completeness_and_retry_incomplete(tmp_path: Path):
+    lib = Library(tmp_path / "lib")
+    url = "https://example.org/calculator"
+    lib.enqueue(url, 2)
+    lib.save_page(
+        url, url, "Calculator", "<html><body>calculator</body></html>",
+        "calculator", 200, 2, [], completeness="partial",
+        completeness_notes="Fetch/XHR API detected"
+    )
+    row = lib.list_pages()[0]
+    assert row["completeness"] == "partial"
+    assert "API detected" in row["completeness_notes"]
+    assert lib.queue_stats()["incomplete"] == 1
+    assert lib.retry_incomplete() == 1
+    assert lib.pending_queue()[0]["url"] == url
