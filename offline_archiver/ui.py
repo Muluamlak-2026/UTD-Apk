@@ -118,9 +118,10 @@ class Window(QMainWindow):
         controls = QHBoxLayout()
         self.login = QPushButton("Open sign-in browser")
         self.crawl = QPushButton("Start / Resume")
+        self.next_page = QPushButton("Next page")
         self.pause = QPushButton("Pause")
         self.stop = QPushButton("Stop")
-        for button in (self.login, self.crawl, self.pause, self.stop):
+        for button in (self.login, self.crawl, self.next_page, self.pause, self.stop):
             controls.addWidget(button)
         layout.addLayout(controls)
 
@@ -161,6 +162,7 @@ class Window(QMainWindow):
         """)
 
         self.login.clicked.connect(lambda: self.start("login"))
+        self.next_page.clicked.connect(lambda: self.start("crawl", one_page=True))
         self.browse_btn.clicked.connect(self.choose_destination)
         self.crawl.clicked.connect(lambda: self.start("crawl"))
         self.stop.clicked.connect(self.stop_task)
@@ -175,7 +177,7 @@ class Window(QMainWindow):
         self.verify_btn.clicked.connect(self.verify_library)
         self.refresh()
 
-    def start(self, mode):
+    def start(self, mode, one_page=False):
         if self.task and self.task.isRunning():
             QMessageBox.information(self, "Busy", "Stop the current task first.")
             return
@@ -194,7 +196,7 @@ class Window(QMainWindow):
             return
         self.destination = destination
         self.lib = Archiver(destination, lambda *args: None, threading.Event(), threading.Event()).library
-        opts = {"max_pages": self.pages.value(), "max_depth": self.depth.value(), "delay": self.delay.value()}
+        opts = {"max_pages": 1 if one_page else self.pages.value(), "max_depth": self.depth.value(), "delay": self.delay.value()}
         self.task = Task(mode, url, destination, opts)
         self.task.status.connect(self.status.setText)
         self.task.progress.connect(self.on_progress)
