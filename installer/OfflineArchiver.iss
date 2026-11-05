@@ -8,7 +8,7 @@ AppId={{D76A49E7-6E7A-49A1-A43D-7C35E4E6A7B9}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\Offline Archiver
+DefaultDirName={localappdata}\Programs\Offline Archiver
 DefaultGroupName={#AppName}
 OutputDir=..\dist
 OutputBaseFilename=OfflineArchiver-Setup-x64
@@ -17,7 +17,7 @@ ArchitecturesAllowed=x64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\{#AppExeName}
 
 [Files]
