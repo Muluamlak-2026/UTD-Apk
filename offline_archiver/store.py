@@ -266,3 +266,27 @@ class Library:
                 "format": "OfflineArchiverPortable", "version": 2, "generated": self.now(),
                 "pages": len(rows), "assets": len(assets)
             }, indent=2))
+
+    def queue_items(self, state=None, limit=5000):
+        with self.lock:
+            if state and state != "all":
+                rows = self.db.execute("SELECT url,depth,state,attempts,error,updated FROM crawl_queue WHERE state=? ORDER BY id DESC LIMIT ?", (state, limit)).fetchall()
+            else:
+                rows = self.db.execute("SELECT url,depth,state,attempts,error,updated FROM crawl_queue ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def queue_stats(self):
+        with self.lock:
+            counts = {r["state"]: r["n"] for r in self.db.execute("SELECT state,COUNT(*) n FROM crawl_queue GROUP BY state")}
+            counts["downloaded"] = self.db.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+            counts["assets"] = self.db.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+            counts["failures"] = self.db.execute("SELECT COUNT(*) FROM failures").fetchone()[0]
+        return counts
+
+    def add_url(self, url, depth=0):
+        return self.enqueue(url, depth)
+
+    def force_redownload(self, url, depth=0):
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO crawl_queue(url,depth,state,attempts,error,updated) VALUES(?,?,'pending',0,NULL,?) ON CONFLICT(url) DO UPDATE SET depth=excluded.depth,state='pending',error=NULL,updated=excluded.updated", (url, depth, self.now()))
+            return True
