@@ -25,8 +25,8 @@ This is a testable first release, not a certified full-site mirroring engine. A 
 - Do not use this tool to redistribute copyrighted subscription content. Use it only where your subscription terms and applicable law permit local retention.
 
 ## Install and test
-1. Download the Windows x64 installer from the GitHub Actions artifact named `OfflineArchiver-Windows-x64`.
-2. Install and launch. Microsoft Edge must be installed on Windows.
+1. Download the single compact Windows x64 installer (`OfflineArchiver-Setup-x64.exe`) from the GitHub Actions artifact named `OfflineArchiver-Windows-x64`. The build no longer uploads a second duplicate portable package.
+2. Install and launch. Microsoft Edge must be installed on Windows. It is deliberately not bundled: Playwright controls the Edge already installed on the PC, avoiding a second browser runtime in the installer.
 3. Enter a site URL and select **Open sign-in browser**. Complete sign-in manually, then stop the browser task.
 4. Enter an authorized topic URL and select **Start / Resume**.
 5. Test pause/resume, stop, retry failed, restore passed, search, double-click offline page opening, integrity verification and portable ZIP export.
@@ -42,6 +42,9 @@ This is a testable first release, not a certified full-site mirroring engine. A 
 - `python -m offline_archiver`
 
 GitHub Actions compiles, runs tests, packages the application and creates an Inno Setup installer on pushes to main and version tags. A successful CI build confirms compilation, automated tests and packaging; it does not replace real-world site testing.
+
+## Package size strategy
+The desktop UI uses only Qt Essentials (QtCore, QtGui and QtWidgets). Qt WebEngine, Qt PDF, Qt 3D, Qt Multimedia, Qt Charts, QML and Quick modules are excluded because the application does not use them. The installer is the only uploaded artifact; a second ZIP containing the same application is not uploaded. Microsoft Edge is an existing Windows dependency and is not duplicated inside the package. These changes reduce packaging overhead without removing the crawler, browser automation, local database, asset capture, search, queue controls, integrity checks or export features.
 
 ## Data location
 Default data folder: `%LOCALAPPDATA%\\OfflineArchiver`. The browser profile, cookies, database and archive content are stored there. Keep sufficient disk space and back up the library folder before major changes.
