@@ -92,20 +92,11 @@ class Archiver:
                 done += 1
                 self.emit("progress", done, max_pages, url)
                 resources = {}
+                observed_responses = []
                 def on_response(response):
-                    try:
-                        req = response.request
-                        if req.method != "GET" or response.status >= 400:
-                            return
-                        mime = response.headers.get("content-type", "").split(";")[0].lower()
-                        if not (mime.startswith(ASSET_TYPES) or mime in ASSET_MIMES):
-                            return
-                        body = response.body()
-                        if not body or len(body) > MAX_RESOURCE_BYTES:
-                            return
-                        resources[canonical(response.url)] = self.library.save_asset(response.url, body, mime)
-                    except Exception:
-                        pass
+                    # Defer Playwright calls until the normal synchronous worker flow.
+                    # Calling response.body() inside this callback can break the sync bridge.
+                    observed_responses.append(response)
                 page.on("response", on_response)
                 try:
                     response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -137,6 +128,19 @@ class Archiver:
                       window.scrollTo(0,0);
                     }""")
                     page.wait_for_timeout(500)
+                    for asset_response in observed_responses:
+                        try:
+                            req = asset_response.request
+                            if req.method != "GET" or asset_response.status >= 400:
+                                continue
+                            mime = asset_response.headers.get("content-type", "").split(";")[0].lower()
+                            if not (mime.startswith(ASSET_TYPES) or mime in ASSET_MIMES):
+                                continue
+                            body = asset_response.body()
+                            if body and len(body) <= MAX_RESOURCE_BYTES:
+                                resources[canonical(asset_response.url)] = self.library.save_asset(asset_response.url, body, mime)
+                        except Exception as asset_error:
+                            self.emit("status", "Skipped one unavailable resource: " + str(asset_error)[:180])
                     final_url = canonical(page.url) or url
                     html = page.content()
                     soup = BeautifulSoup(html, "html.parser")
