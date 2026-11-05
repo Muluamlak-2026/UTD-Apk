@@ -1,21 +1,92 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
-from PySide6.QtCore import QThread, Signal, QUrl
+from PySide6.QtCore import QThread, Signal, QUrl, Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import *
+from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
+from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from .engine import Archiver
 
 
-def home():
+def home() -> Path:
     path = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "OfflineArchiver"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+class EmbeddedBrowser(QWidget):
+    """Persistent in-app Chromium browser. Cookies are bridged to the capture worker."""
+    def __init__(self, data_dir: Path, parent=None):
+        super().__init__(parent)
+        self.data_dir = data_dir
+        self.cookies: dict[str, dict] = {}
+        self.profile = QWebEngineProfile("OfflineArchiver", self)
+        storage = data_dir / "embedded-browser"
+        storage.mkdir(parents=True, exist_ok=True)
+        self.profile.setPersistentStoragePath(str(storage / "storage"))
+        self.profile.setCachePath(str(storage / "cache"))
+        self.profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        self.profile.cookieStore().cookieAdded.connect(self._cookie_added)
+        self.profile.cookieStore().loadAllCookies()
+
+        layout = QVBoxLayout(self)
+        nav = QHBoxLayout()
+        self.back = QPushButton("←")
+        self.forward = QPushButton("→")
+        self.reload = QPushButton("↻")
+        self.address = QLineEdit("https://www.uptodate.com/contents/table-of-contents")
+        self.address.setPlaceholderText("Enter an authorized website URL")
+        self.go = QPushButton("Go")
+        self.session = QLabel("Persistent browser profile")
+        for w in (self.back, self.forward, self.reload, self.address, self.go):
+            nav.addWidget(w)
+        nav.addWidget(self.session)
+        layout.addLayout(nav)
+        self.view = QWebEngineView(self)
+        self.view.setPage(QWebEnginePage(self.profile, self.view))
+        layout.addWidget(self.view, 1)
+        self.back.clicked.connect(self.view.back)
+        self.forward.clicked.connect(self.view.forward)
+        self.reload.clicked.connect(self.view.reload)
+        self.go.clicked.connect(self.navigate)
+        self.address.returnPressed.connect(self.navigate)
+        self.view.urlChanged.connect(lambda u: self.address.setText(u.toString()))
+        self.view.loadStarted.connect(lambda: self.session.setText("Loading…"))
+        self.view.loadFinished.connect(lambda ok: self.session.setText("Browser ready" if ok else "Page load failed"))
+        self.view.load(QUrl(self.address.text()))
+
+    def navigate(self):
+        value = self.address.text().strip()
+        if not urlparse(value).scheme:
+            value = "https://" + value
+        self.view.load(QUrl(value))
+
+    def _cookie_added(self, cookie):
+        try:
+            name = bytes(cookie.name()).decode("utf-8", "replace")
+            value = bytes(cookie.value()).decode("utf-8", "replace")
+            domain = cookie.domain()
+            path = cookie.path() or "/"
+            item = {"name": name, "value": value, "domain": domain, "path": path,
+                    "secure": cookie.isSecure(), "httpOnly": cookie.isHttpOnly()}
+            expiry = cookie.expirationDate()
+            if expiry.isValid():
+                item["expires"] = expiry.toSecsSinceEpoch()
+            key = (name, domain, path)
+            self.cookies[str(key)] = item
+        except Exception:
+            pass
+
+    def cookie_snapshot(self):
+        return list(self.cookies.values())
 
 
 class Task(QThread):
@@ -23,9 +94,9 @@ class Task(QThread):
     progress = Signal(int, int, str)
     page = Signal(int, str, str)
 
-    def __init__(self, mode, url, opts=None):
+    def __init__(self, url, opts):
         super().__init__()
-        self.mode, self.url, self.opts = mode, url, opts or {}
+        self.url, self.opts = url, opts
         self.stop_event, self.pause_event = threading.Event(), threading.Event()
         self.engine = Archiver(home(), self.emit_event, self.stop_event, self.pause_event)
 
@@ -39,10 +110,7 @@ class Task(QThread):
 
     def run(self):
         try:
-            if self.mode == "login":
-                self.engine.open_login(self.url)
-            else:
-                self.engine.crawl(self.url, **self.opts)
+            self.engine.crawl(self.url, **self.opts)
         except Exception as exc:
             self.status.emit("Error: " + str(exc))
         finally:
@@ -57,202 +125,289 @@ class Window(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Offline Archiver")
-        self.resize(1240, 820)
-        self.task = None
-        self.lib = Archiver(home(), lambda *args: None, threading.Event(), threading.Event()).library
+        self.resize(1480, 940)
+        self.data_dir = home()
+        self.lib = Archiver(self.data_dir, lambda *a: None, threading.Event(), threading.Event()).library
+        self.task: Task | None = None
+        self._build_ui()
+        self.refresh_all()
 
+    def _build_ui(self):
         root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(24, 20, 24, 20)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(16, 12, 16, 12)
         header = QHBoxLayout()
         title = QLabel("Offline Archiver")
-        title.setStyleSheet("font-size:25px;font-weight:700;color:#142b4a")
+        title.setStyleSheet("font-size:26px;font-weight:700;color:#16345b")
         header.addWidget(title)
         header.addStretch()
         self.status = QLabel("Ready")
         header.addWidget(self.status)
-        layout.addLayout(header)
+        outer.addLayout(header)
 
-        self.url = QLineEdit()
-        self.url.setPlaceholderText("Authorized website or topic URL")
-        layout.addWidget(self.url)
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs, 1)
+        self.browser = EmbeddedBrowser(self.data_dir)
+        self.tabs.addTab(self.browser, "Browser & Sign-in")
+        self.tabs.addTab(self._dashboard_tab(), "Dashboard")
+        self.tabs.addTab(self._queue_tab(), "Queue & Six-list ledger")
+        self.tabs.addTab(self._library_tab(), "Search & Offline library")
+        self.tabs.addTab(self._diagnostics_tab(), "Diagnostics & Export")
 
-        options = QHBoxLayout()
-        self.pages = QSpinBox()
-        self.pages.setRange(1, 10000)
-        self.pages.setValue(100)
-        self.depth = QSpinBox()
-        self.depth.setRange(0, 20)
-        self.depth.setValue(3)
-        self.delay = QDoubleSpinBox()
-        self.delay.setRange(.2, 30)
-        self.delay.setValue(1.5)
-        for label, widget in (("Max pages / run", self.pages), ("Link depth", self.depth), ("Delay (sec)", self.delay)):
-            options.addWidget(QLabel(label))
-            options.addWidget(widget)
-        layout.addLayout(options)
-
-        controls = QHBoxLayout()
-        self.login = QPushButton("Open sign-in browser")
-        self.crawl = QPushButton("Start / Resume")
-        self.pause = QPushButton("Pause")
-        self.stop = QPushButton("Stop")
-        for button in (self.login, self.crawl, self.pause, self.stop):
-            controls.addWidget(button)
-        layout.addLayout(controls)
-
-        self.bar = QProgressBar()
-        layout.addWidget(self.bar)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Title", "URL", "State", "Saved"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.table.cellDoubleClicked.connect(self.open_page)
-        layout.addWidget(self.table)
-
-        bottom = QHBoxLayout()
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search saved content")
-        self.search_btn = QPushButton("Search")
-        self.refresh_btn = QPushButton("Refresh")
-        self.pass_btn = QPushButton("Pass selected URL")
-        self.restore_btn = QPushButton("Restore passed")
-        self.retry_btn = QPushButton("Retry failed")
-        self.verify_btn = QPushButton("Verify library")
-        self.export_btn = QPushButton("Export portable ZIP")
-        for widget in (self.search, self.search_btn, self.refresh_btn, self.pass_btn,
-                       self.restore_btn, self.retry_btn, self.verify_btn, self.export_btn):
-            bottom.addWidget(widget)
-        layout.addLayout(bottom)
         self.setCentralWidget(root)
-
         self.setStyleSheet("""
-            QMainWindow,QWidget{background:#f4f6fa;color:#1e293b;font-family:Segoe UI}
-            QLineEdit,QSpinBox,QDoubleSpinBox{background:white;border:1px solid #cbd5e1;border-radius:6px;padding:8px}
-            QPushButton{background:#e5edf8;border:0;border-radius:6px;padding:10px;font-weight:600}
-            QPushButton:hover{background:#d2e0f3}
-            QProgressBar{height:14px;border:0;background:#e2e8f0;border-radius:6px;text-align:center}
-            QProgressBar::chunk{background:#2563eb;border-radius:6px}
-            QTableWidget{background:white;gridline-color:#e8edf3}
-            QHeaderView::section{background:#edf2f8;padding:8px;border:0;font-weight:600}
+          QMainWindow,QWidget{background:#f4f6fa;color:#1e293b;font-family:Segoe UI}
+          QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox{background:white;border:1px solid #cbd5e1;border-radius:6px;padding:7px}
+          QPushButton{background:#e5edf8;border:0;border-radius:6px;padding:9px 12px;font-weight:600}
+          QPushButton:hover{background:#d2e0f3}
+          QTabWidget::pane{background:#f4f6fa;border:1px solid #d9e2ef}
+          QTabBar::tab{padding:11px 16px;background:#e8eef7;border-top-left-radius:5px;border-top-right-radius:5px}
+          QTabBar::tab:selected{background:#fff;color:#1557a6;font-weight:700}
+          QTableWidget{background:white;gridline-color:#e8edf3}
+          QHeaderView::section{background:#edf2f8;padding:8px;border:0;font-weight:600}
+          QProgressBar{height:16px;border:0;background:#e2e8f0;border-radius:6px;text-align:center}
+          QProgressBar::chunk{background:#2563eb;border-radius:6px}
         """)
 
-        self.login.clicked.connect(lambda: self.start("login"))
-        self.crawl.clicked.connect(lambda: self.start("crawl"))
-        self.stop.clicked.connect(self.stop_task)
-        self.pause.clicked.connect(self.pause_task)
-        self.refresh_btn.clicked.connect(self.refresh)
-        self.search_btn.clicked.connect(self.search_pages)
-        self.search.returnPressed.connect(self.search_pages)
-        self.export_btn.clicked.connect(self.export)
-        self.pass_btn.clicked.connect(self.pass_selected)
-        self.restore_btn.clicked.connect(self.restore_passed)
-        self.retry_btn.clicked.connect(self.retry_failed)
-        self.verify_btn.clicked.connect(self.verify_library)
-        self.refresh()
+    def _dashboard_tab(self):
+        w = QWidget(); layout = QVBoxLayout(w)
+        intro = QLabel("Archive authorized pages using the embedded browser session. Sign in manually; the downloader never submits credentials.")
+        intro.setWordWrap(True); layout.addWidget(intro)
+        self.metrics = {}
+        grid = QGridLayout()
+        labels = [("downloaded","Downloaded"),("pending","Pending"),("failed","Failed"),("passed","Passed"),
+                  ("redownloaded","Redownloaded"),("incomplete","Incomplete / JS issues"),("attempted","Attempted"),("assets","Assets")]
+        for i,(key,label) in enumerate(labels):
+            card = QFrame(); card.setStyleSheet("QFrame{background:white;border:1px solid #e1e8f0;border-radius:9px}")
+            box = QVBoxLayout(card); value = QLabel("0"); value.setAlignment(Qt.AlignCenter)
+            value.setStyleSheet("font-size:25px;font-weight:700;color:#1d4f91")
+            caption = QLabel(label); caption.setAlignment(Qt.AlignCenter)
+            box.addWidget(value); box.addWidget(caption); self.metrics[key] = value
+            grid.addWidget(card, i//4, i%4)
+        layout.addLayout(grid)
+        form = QGridLayout()
+        self.url = QLineEdit("https://www.uptodate.com/contents/table-of-contents")
+        self.url.setPlaceholderText("Authorized starting URL")
+        self.pages = QSpinBox(); self.pages.setRange(1,10000); self.pages.setValue(500)
+        self.depth = QSpinBox(); self.depth.setRange(0,20); self.depth.setValue(5)
+        self.delay = QDoubleSpinBox(); self.delay.setRange(1,120); self.delay.setValue(5.0); self.delay.setSuffix(" sec")
+        form.addWidget(QLabel("Start URL"),0,0); form.addWidget(self.url,0,1,1,5)
+        form.addWidget(QLabel("Max pages / run"),1,0); form.addWidget(self.pages,1,1)
+        form.addWidget(QLabel("Link depth"),1,2); form.addWidget(self.depth,1,3)
+        form.addWidget(QLabel("Delay between pages"),1,4); form.addWidget(self.delay,1,5)
+        layout.addLayout(form)
+        controls=QHBoxLayout()
+        self.start_btn=QPushButton("Start / Resume download"); self.pause_btn=QPushButton("Pause after current page")
+        self.stop_btn=QPushButton("Stop safely"); self.finish_btn=QPushButton("Finish & refresh index")
+        for b in (self.start_btn,self.pause_btn,self.stop_btn,self.finish_btn): controls.addWidget(b)
+        layout.addLayout(controls)
+        self.progress=QProgressBar(); layout.addWidget(self.progress)
+        self.start_btn.clicked.connect(self.start_crawl); self.pause_btn.clicked.connect(self.pause_task)
+        self.stop_btn.clicked.connect(self.stop_task); self.finish_btn.clicked.connect(self.refresh_all)
+        note=QLabel("Safety: use one account session, low request rates, and only content you are permitted to save. Authentication errors and rate limits stop retries.")
+        note.setWordWrap(True); note.setStyleSheet("color:#8a4b12;padding:8px")
+        layout.addWidget(note); layout.addStretch()
+        return w
 
-    def start(self, mode):
+    def _queue_tab(self):
+        w=QWidget(); layout=QVBoxLayout(w)
+        row=QHBoxLayout()
+        self.ledger_filter=QComboBox(); self.ledger_filter.addItems(["all","pending","failed","passed","saved","running"])
+        self.ledger_filter.currentTextChanged.connect(self.refresh_queue)
+        self.queue_search=QLineEdit(); self.queue_search.setPlaceholderText("Filter URL or failure reason")
+        self.queue_search.textChanged.connect(self.refresh_queue)
+        row.addWidget(QLabel("List")); row.addWidget(self.ledger_filter); row.addWidget(self.queue_search,1)
+        layout.addLayout(row)
+        self.queue_table=QTableWidget(0,5); self.queue_table.setHorizontalHeaderLabels(["URL","State","Depth","Attempts","Reason / last error"])
+        self.queue_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
+        self.queue_table.horizontalHeader().setSectionResizeMode(4,QHeaderView.Stretch)
+        layout.addWidget(self.queue_table,1)
+        add=QGroupBox("Add / pass / redownload URLs"); form=QGridLayout(add)
+        self.add_url=QLineEdit(); self.add_url.setPlaceholderText("https://example.com/topic")
+        self.add_btn=QPushButton("Add to queue")
+        self.pass_url=QLineEdit(); self.pass_url.setPlaceholderText("URL to skip")
+        self.pass_reason=QLineEdit(); self.pass_reason.setPlaceholderText("Reason (optional)")
+        self.pass_btn=QPushButton("Pass / skip URL")
+        self.redownload_url=QLineEdit(); self.redownload_url.setPlaceholderText("URL to force redownload")
+        self.redownload_btn=QPushButton("Redownload this page")
+        form.addWidget(self.add_url,0,0,1,2); form.addWidget(self.add_btn,0,2)
+        form.addWidget(self.pass_url,1,0); form.addWidget(self.pass_reason,1,1); form.addWidget(self.pass_btn,1,2)
+        form.addWidget(self.redownload_url,2,0,1,2); form.addWidget(self.redownload_btn,2,2)
+        layout.addWidget(add)
+        actions=QHBoxLayout()
+        self.restore_btn=QPushButton("Restore passed URLs"); self.retry_btn=QPushButton("Retry failed pages")
+        self.retry_incomplete_btn=QPushButton("Retry incomplete JS pages")
+        for b in (self.restore_btn,self.retry_btn,self.retry_incomplete_btn): actions.addWidget(b)
+        layout.addLayout(actions)
+        self.add_btn.clicked.connect(self.add_to_queue); self.pass_btn.clicked.connect(self.pass_url_action)
+        self.redownload_btn.clicked.connect(self.redownload_action); self.restore_btn.clicked.connect(self.restore_passed)
+        self.retry_btn.clicked.connect(self.retry_failed); self.retry_incomplete_btn.clicked.connect(self.retry_incomplete)
+        return w
+
+    def _library_tab(self):
+        w=QWidget(); layout=QVBoxLayout(w)
+        row=QHBoxLayout(); self.search=QLineEdit(); self.search.setPlaceholderText("Search saved pages and topic text")
+        self.search_btn=QPushButton("Search"); self.refresh_btn=QPushButton("Show all saved pages")
+        row.addWidget(self.search,1); row.addWidget(self.search_btn); row.addWidget(self.refresh_btn); layout.addLayout(row)
+        self.page_table=QTableWidget(0,4); self.page_table.setHorizontalHeaderLabels(["Title","URL","HTTP","Saved"])
+        self.page_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
+        self.page_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.Stretch)
+        self.page_table.cellDoubleClicked.connect(self.open_page); layout.addWidget(self.page_table,1)
+        self.search_btn.clicked.connect(self.search_pages); self.search.returnPressed.connect(self.search_pages)
+        self.refresh_btn.clicked.connect(self.refresh_pages)
+        return w
+
+    def _diagnostics_tab(self):
+        w=QWidget(); layout=QVBoxLayout(w)
+        buttons=QHBoxLayout()
+        self.verify_btn=QPushButton("Verify archive integrity"); self.export_btn=QPushButton("Export portable ZIP")
+        self.open_archive_btn=QPushButton("Open archive folder"); self.report_btn=QPushButton("Save diagnostic report")
+        for b in (self.verify_btn,self.export_btn,self.open_archive_btn,self.report_btn): buttons.addWidget(b)
+        layout.addLayout(buttons)
+        self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setPlaceholderText("Recent activity and diagnostics"); layout.addWidget(self.log,1)
+        self.verify_btn.clicked.connect(self.verify_library); self.export_btn.clicked.connect(self.export)
+        self.open_archive_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir / "library"))))
+        self.report_btn.clicked.connect(self.save_report)
+        return w
+
+    def start_crawl(self):
         if self.task and self.task.isRunning():
-            QMessageBox.information(self, "Busy", "Stop the current task first.")
-            return
-        url = self.url.text().strip()
-        if not url.startswith(("http://", "https://")):
-            QMessageBox.warning(self, "URL", "Enter a valid HTTP or HTTPS URL.")
-            return
-        opts = {"max_pages": self.pages.value(), "max_depth": self.depth.value(), "delay": self.delay.value()}
-        self.task = Task(mode, url, opts)
-        self.task.status.connect(self.status.setText)
-        self.task.progress.connect(self.on_progress)
-        self.task.page.connect(lambda *_: self.refresh())
-        self.task.start()
+            QMessageBox.information(self,"Busy","Stop the current download first."); return
+        url=self.url.text().strip()
+        if not url.startswith(("http://","https://")):
+            QMessageBox.warning(self,"URL","Enter a valid HTTP or HTTPS URL."); return
+        host=urlparse(url).hostname
+        cookies=[c for c in self.browser.cookie_snapshot() if host and (c.get("domain","").lstrip(".")==host or host.endswith("."+c.get("domain","").lstrip(".")))]
+        if not cookies:
+            answer=QMessageBox.question(self,"No matching browser cookies",
+                "No cookies for this site have been captured from the embedded browser. Continue only if the page is public or your session does not use cookies.")
+            if answer != QMessageBox.Yes: self.tabs.setCurrentIndex(0); return
+        opts={"max_pages":self.pages.value(),"max_depth":self.depth.value(),"delay":self.delay.value(),
+              "cookies":cookies,"include_external":False}
+        self.task=Task(url,opts); self.task.status.connect(self.set_status)
+        self.task.progress.connect(self.on_progress); self.task.page.connect(self.on_page)
+        self.task.start(); self.set_status("Download started with conservative single-page requests.")
+        self.tabs.setCurrentIndex(1)
+
+    def set_status(self,text):
+        self.status.setText(text); self.log.appendPlainText(text)
+
+    def on_progress(self,current,total,url):
+        self.progress.setMaximum(max(1,total)); self.progress.setValue(current)
+        self.status.setText(f"{current}/{total} · {url[:110]}")
+
+    def on_page(self,*_):
+        self.refresh_all()
 
     def stop_task(self):
-        if self.task:
-            self.task.stop()
-            self.status.setText("Stopping safely…")
+        if self.task and self.task.isRunning():
+            self.task.stop(); self.set_status("Stopping safely after current page…")
 
     def pause_task(self):
-        if not self.task or not self.task.isRunning():
-            return
+        if not self.task or not self.task.isRunning(): return
         if self.task.pause_event.is_set():
-            self.task.pause_event.clear()
-            self.pause.setText("Pause")
+            self.task.pause_event.clear(); self.pause_btn.setText("Pause after current page")
         else:
-            self.task.pause_event.set()
-            self.pause.setText("Resume")
+            self.task.pause_event.set(); self.pause_btn.setText("Resume")
 
-    def on_progress(self, current, total, url):
-        self.bar.setMaximum(max(1, total))
-        self.bar.setValue(current)
-        self.status.setText(url[:100])
+    def refresh_all(self):
+        counts=self.lib.queue_stats()
+        for key in self.metrics:
+            self.metrics[key].setText(str(counts.get(key,0)))
+        self.refresh_queue(); self.refresh_pages()
 
-    def refresh(self):
-        rows = self.lib.list_pages()
-        self.table.setRowCount(len(rows))
-        for i, row in enumerate(rows):
-            for j, key in enumerate(("title", "url", "state", "saved_at")):
-                self.table.setItem(i, j, QTableWidgetItem(str(row.get(key) or "")))
-            self.table.item(i, 0).setData(32, row.get("html_path"))
-        pages, assets, failures = self.lib.stats()
-        self.status.setText(f"{pages} pages · {assets} assets · {failures} failures")
+    def refresh_queue(self):
+        state=self.ledger_filter.currentText() if hasattr(self,"ledger_filter") else "all"
+        rows=self.lib.queue_items(state)
+        term=self.queue_search.text().casefold() if hasattr(self,"queue_search") else ""
+        rows=[r for r in rows if not term or term in r["url"].casefold() or term in (r.get("error") or "").casefold()]
+        self.queue_table.setRowCount(len(rows))
+        for i,r in enumerate(rows):
+            vals=[r["url"],r["state"],r["depth"],r["attempts"],r.get("error") or ""]
+            for j,v in enumerate(vals): self.queue_table.setItem(i,j,QTableWidgetItem(str(v)))
 
-    def open_page(self, row, col):
-        item = self.table.item(row, 0)
-        if item:
-            path = home() / "library" / (item.data(32) or "")
-            if path.is_file():
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+    def refresh_pages(self):
+        rows=self.lib.list_pages(); self._fill_pages(rows)
+
+    def _fill_pages(self,rows):
+        self.page_table.setRowCount(len(rows))
+        for i,r in enumerate(rows):
+            vals=[r.get("title"),r.get("url"),r.get("status"),r.get("saved_at")]
+            for j,v in enumerate(vals): self.page_table.setItem(i,j,QTableWidgetItem(str(v or "")))
+            self.page_table.item(i,0).setData(Qt.UserRole,r.get("html_path"))
 
     def search_pages(self):
-        rows = self.lib.search(self.search.text())
-        self.table.setRowCount(len(rows))
-        for i, row in enumerate(rows):
-            for j, key in enumerate(("title", "url", "saved_at")):
-                self.table.setItem(i, j, QTableWidgetItem(str(row.get(key) or "")))
-            self.table.item(i, 0).setData(32, row.get("html_path"))
+        self._fill_pages(self.lib.search(self.search.text()))
 
-    def pass_selected(self):
-        row = self.table.currentRow()
-        if row < 0 or not self.table.item(row, 1):
-            QMessageBox.information(self, "Select URL", "Select a saved page row first.")
-            return
-        url = self.table.item(row, 1).text()
-        self.lib.pass_url(url)
-        self.status.setText("Marked as passed: " + url)
-        self.refresh()
+    def open_page(self,row,col):
+        item=self.page_table.item(row,0)
+        if item:
+            path=self.data_dir/"library"/(item.data(Qt.UserRole) or "")
+            if path.is_file(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def add_to_queue(self):
+        url=self.add_url.text().strip()
+        if not url.startswith(("http://","https://")):
+            QMessageBox.warning(self,"URL","Enter a full HTTP or HTTPS URL."); return
+        added=self.lib.add_url(url,0)
+        self.set_status("URL added to queue." if added else "URL already exists in the queue.")
+        self.add_url.clear(); self.refresh_all()
+
+    def pass_url_action(self):
+        url=self.pass_url.text().strip()
+        if not url: QMessageBox.warning(self,"URL","Enter the URL to skip."); return
+        self.lib.enqueue(url,0); self.lib.pass_url(url)
+        reason=self.pass_reason.text().strip()
+        if reason: self.lib.set_queue_state(url,"passed",reason)
+        self.pass_url.clear(); self.pass_reason.clear(); self.refresh_all()
+        self.set_status("URL marked as passed; it remains visible in the ledger.")
+
+    def redownload_action(self):
+        url=self.redownload_url.text().strip()
+        if not url: QMessageBox.warning(self,"URL","Enter a URL."); return
+        self.lib.force_redownload(url,0); self.redownload_url.clear(); self.refresh_all()
+        self.set_status("URL queued for forced recapture.")
 
     def restore_passed(self):
-        count = self.lib.restore_passed()
-        QMessageBox.information(self, "Restore", f"Restored {count} passed queue entries.")
-        self.refresh()
+        n=self.lib.restore_passed(); self.set_status(f"Restored {n} passed URLs."); self.refresh_all()
 
     def retry_failed(self):
-        count = self.lib.retry_failed()
-        if count:
-            QMessageBox.information(self, "Retry", f"Re-queued {count} failed URLs. Start/Resume to continue.")
-        else:
-            QMessageBox.information(self, "Retry", "No failed queue entries to retry.")
-        self.refresh()
+        n=self.lib.retry_failed(); self.set_status(f"Re-queued {n} failed URLs. Start / Resume to continue."); self.refresh_all()
+
+    def retry_incomplete(self):
+        self.set_status("Incomplete-JavaScript retry is not yet separately classified by the capture engine; inspect Diagnostics before retrying affected pages.")
 
     def verify_library(self):
-        problems = self.lib.verify()
-        if problems:
-            QMessageBox.warning(self, "Integrity check", "\n".join(problems[:30]))
-        else:
-            QMessageBox.information(self, "Integrity check", "All indexed page and asset files passed SHA-256 verification.")
+        issues=self.lib.verify()
+        if issues:
+            QMessageBox.warning(self,"Integrity check","\n".join(issues[:50])); self.log.appendPlainText("\n".join(issues))
+        else: QMessageBox.information(self,"Integrity check","All indexed page and asset files passed SHA-256 verification.")
 
     def export(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export ZIP", "OfflineArchiver.zip", "ZIP (*.zip)")
+        path,_=QFileDialog.getSaveFileName(self,"Export portable archive","OfflineArchiver.zip","ZIP (*.zip)")
         if path:
-            try:
-                self.lib.export_zip(Path(path))
-                QMessageBox.information(self, "Export", "Portable ZIP export completed.")
-            except Exception as exc:
-                QMessageBox.critical(self, "Export error", str(exc))
+            try: self.lib.export_zip(Path(path)); QMessageBox.information(self,"Export","Portable ZIP export completed.")
+            except Exception as exc: QMessageBox.critical(self,"Export error",str(exc))
+
+    def save_report(self):
+        path,_=QFileDialog.getSaveFileName(self,"Save diagnostics","OfflineArchiver-diagnostics.txt","Text (*.txt)")
+        if path:
+            counts=self.lib.queue_stats()
+            failures=self.lib.list_failures()
+            lines=["Offline Archiver diagnostic report",json.dumps(counts,indent=2),"", "Recent failures:"]
+            lines.extend(f'{r["created"]} | {r["url"]} | {r["error"]}' for r in failures[:300])
+            lines.extend(["","Recent application activity:",self.log.toPlainText()])
+            Path(path).write_text("\n".join(lines),encoding="utf-8")
+            self.set_status("Diagnostic report saved.")
+
+    def closeEvent(self,event):
+        if self.task and self.task.isRunning():
+            self.task.stop(); self.task.wait(5000)
+        event.accept()
 
 
 def main():
-    app = QApplication(sys.argv)
-    window = Window()
-    window.show()
+    # Do not disable Chromium's sandbox. The embedded browser keeps its own persistent profile.
+    app=QApplication(sys.argv)
+    window=Window(); window.show()
     return app.exec()
