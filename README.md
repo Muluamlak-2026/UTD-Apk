@@ -1,5 +1,7 @@
 # Offline Archiver for Windows
 
+> **Canonical repository:** [Muluamlak-2026/UTD-Apk](https://github.com/Muluamlak-2026/UTD-Apk). All future source changes, Windows builds, installers, and release artifacts for this application must be made from `UTD-Apk`. `Site-Archive-Browser` is not the active build repository.
+
 A Windows desktop offline website archiver with a persistent **embedded Chromium browser tab**, a manually controlled sign-in workflow, a conservative crawl worker, a six-state queue ledger, searchable local archive, integrity checks, diagnostics and portable export.
 
 ## Main application tabs
