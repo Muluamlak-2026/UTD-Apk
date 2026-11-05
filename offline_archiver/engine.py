@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import mimetypes
-import os
 import re
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, urldefrag, unquote
+from urllib.parse import urljoin, urlparse, urldefrag
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from .store import Library
+
+
+MAX_RESOURCE_BYTES = 30 * 1024 * 1024
+ASSET_TYPES = ("image/", "font/", "audio/", "video/")
+ASSET_MIMES = {"text/css", "application/pdf", "application/wasm"}
 
 
 def canonical(url: str) -> str:
@@ -26,13 +27,8 @@ def canonical(url: str) -> str:
     return p._replace(scheme=p.scheme.lower(), netloc=p.netloc.lower(), path=path).geturl()
 
 
-def safe_name(value: str) -> str:
-    value = re.sub(r"[^a-zA-Z0-9._-]+", "_", value)[:90].strip("._")
-    return value or "resource"
-
-
 class Archiver:
-    """Visible, persistent Edge capture engine. No credential or access-control bypass."""
+    """Visible persistent Edge capture. Authentication remains entirely user-controlled."""
 
     def __init__(self, data_dir: Path, emit, stop_event: threading.Event, pause_event: threading.Event):
         self.data_dir = data_dir
@@ -41,115 +37,141 @@ class Archiver:
         self.pause_event = pause_event
         self.profile_dir = data_dir / "browser-profile"
         self.library = Library(data_dir / "library")
-        self._lock = threading.Lock()
 
     def _wait_if_paused(self):
         while self.pause_event.is_set() and not self.stop_event.is_set():
             time.sleep(.2)
 
+    def _launch(self, p):
+        return p.chromium.launch_persistent_context(
+            str(self.profile_dir), channel="msedge", headless=False, accept_downloads=True,
+            viewport={"width": 1440, "height": 900}, service_workers="allow",
+            args=["--disable-features=msEdgeSidebarV2"],
+        )
+
     def open_login(self, url: str):
-        """Open a visible Edge session; user signs in manually and stops this task to save profile."""
+        url = canonical(url)
+        if not url:
+            raise ValueError("Enter a valid HTTP or HTTPS URL.")
         with sync_playwright() as p:
-            browser = p.chromium.launch_persistent_context(
-                str(self.profile_dir), channel="msedge", headless=False,
-                accept_downloads=True, viewport={"width": 1440, "height": 900},
-                args=["--disable-features=msEdgeSidebarV2"]
-            )
-            page = browser.pages[0] if browser.pages else browser.new_page()
+            context = self._launch(p)
+            page = context.pages[0] if context.pages else context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            self.emit("status", "Browser open. Sign in manually; MFA/CAPTCHA remain interactive. Stop this task when finished.")
+            self.emit("status", "Sign in manually in Edge. MFA/CAPTCHA remain interactive. Stop when finished.")
             while not self.stop_event.wait(.3):
                 pass
-            browser.close()
+            context.close()
         self.emit("status", "Browser profile saved locally.")
 
     def crawl(self, start_url: str, max_pages: int = 100, max_depth: int = 3,
               delay: float = 1.5, include_external: bool = False):
         start_url = canonical(start_url)
         if not start_url:
-            raise ValueError("Enter a valid http or https URL.")
+            raise ValueError("Enter a valid HTTP or HTTPS URL.")
         host = urlparse(start_url).netloc
-        queue = deque([(start_url, 0)])
-        queued = {start_url}
-        visited = set()
         self.library.add_site(start_url)
+        self.library.enqueue(start_url, 0)
+        # Continue from the persisted queue after a normal stop or application restart.
+        queue = deque((r["url"], r["depth"]) for r in self.library.pending_queue())
+        done = 0
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(
-                str(self.profile_dir), channel="msedge", headless=False,
-                accept_downloads=True, viewport={"width": 1440, "height": 900},
-                service_workers="allow"
-            )
+            context = self._launch(p)
             page = context.pages[0] if context.pages else context.new_page()
-            while queue and len(visited) < max_pages and not self.stop_event.is_set():
+            while queue and done < max_pages and not self.stop_event.is_set():
                 self._wait_if_paused()
                 if self.stop_event.is_set():
                     break
                 url, depth = queue.popleft()
-                if url in visited:
-                    continue
-                visited.add(url)
-                self.emit("progress", len(visited), max_pages, url)
+                self.library.set_queue_state(url, "running")
+                done += 1
+                self.emit("progress", done, max_pages, url)
                 resources = {}
                 def on_response(response):
                     try:
                         req = response.request
                         if req.method != "GET" or response.status >= 400:
                             return
-                        ctype = response.headers.get("content-type", "").split(";")[0].lower()
-                        if not (ctype.startswith("image/") or ctype in ("text/css", "font/woff", "font/woff2", "application/font-woff")):
+                        mime = response.headers.get("content-type", "").split(";")[0].lower()
+                        if not (mime.startswith(ASSET_TYPES) or mime in ASSET_MIMES):
                             return
                         body = response.body()
-                        if not body or len(body) > 25 * 1024 * 1024:
+                        if not body or len(body) > MAX_RESOURCE_BYTES:
                             return
-                        rel = self.library.save_asset(response.url, body, ctype)
-                        resources[response.url] = rel
+                        resources[canonical(response.url)] = self.library.save_asset(response.url, body, mime)
                     except Exception:
-                        return
+                        pass
                 page.on("response", on_response)
                 try:
                     response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     try:
-                        page.wait_for_load_state("networkidle", timeout=10000)
+                        page.wait_for_load_state("networkidle", timeout=12000)
                     except PlaywrightTimeoutError:
                         pass
+                    # Trigger lazy-loaded images and infinite-scroll content, but bound the scroll work.
                     page.evaluate("""async () => {
-                      for (let y=0; y<document.body.scrollHeight; y+=700) {
-                        window.scrollTo(0,y); await new Promise(r=>setTimeout(r,120));
+                      const step = Math.max(500, Math.floor(innerHeight * .75));
+                      let previous = -1;
+                      for (let i=0; i<80; i++) {
+                        const height = document.documentElement.scrollHeight;
+                        if (height === previous && i > 2) break;
+                        previous = height;
+                        for (let y=0; y<height; y+=step) {
+                          window.scrollTo(0,y);
+                          await new Promise(r=>setTimeout(r,90));
+                        }
+                        await new Promise(r=>setTimeout(r,250));
                       }
                       window.scrollTo(0,0);
                     }""")
-                    page.wait_for_timeout(700)
+                    page.wait_for_timeout(500)
                     final_url = canonical(page.url) or url
-                    title = page.title() or final_url
                     html = page.content()
                     soup = BeautifulSoup(html, "html.parser")
                     links = []
                     for a in soup.select("a[href]"):
-                        target = canonical(urljoin(final_url, a.get("href", "")))
+                        raw = a.get("href", "")
+                        target = canonical(urljoin(final_url, raw))
                         if not target:
                             continue
                         if not include_external and urlparse(target).netloc != host:
                             continue
-                        if depth < max_depth and target not in queued and len(queued) < max_pages * 5:
-                            queued.add(target)
-                            links.append(target)
-                            queue.append((target, depth + 1))
-                    # Keep absolute source URLs in HTML: browser offline replay can resolve them through saved asset aliases.
-                    for el in soup.select("[src], link[ href ]"):
-                        attr = "src" if el.has_attr("src") else "href"
-                        original = canonical(urljoin(final_url, el.get(attr, "")))
-                        if original in resources:
-                            el[attr] = resources[original]
-                    for el in soup.select("a[href]"):
-                        el["href"] = canonical(urljoin(final_url, el.get("href", ""))) or el.get("href")
+                        if depth < max_depth:
+                            self.library.enqueue(target, depth + 1)
+                            if target not in {u for u, _ in queue}:
+                                queue.append((target, depth + 1))
+                        a["href"] = target
+                        links.append(target)
+                    # Rewrite captured resources to local paths. Keep unknowns absolute so the
+                    # archive never silently points to a fabricated local filename.
+                    for el in soup.select("[src],link[href],source[src],video[poster],audio[src]"):
+                        for attr in ("src", "href", "poster"):
+                            value = el.get(attr)
+                            if value:
+                                absolute = canonical(urljoin(final_url, value))
+                                if absolute in resources:
+                                    el[attr] = resources[absolute]
+                    for el in soup.select("[srcset]"):
+                        rewritten = []
+                        for item in el.get("srcset", "").split(","):
+                            bits = item.strip().split()
+                            if not bits:
+                                continue
+                            absolute = canonical(urljoin(final_url, bits[0]))
+                            bits[0] = resources.get(absolute, absolute)
+                            rewritten.append(" ".join(bits))
+                        el["srcset"] = ", ".join(rewritten)
+                    # Add an archive provenance marker and preserve original URL.
+                    if soup.html:
+                        soup.html["data-archive-source"] = final_url
                     saved = self.library.save_page(
-                        url=final_url, requested_url=url, title=title,
-                        html=str(soup), text=soup.get_text(" ", strip=True),
-                        status=response.status if response else 0, depth=depth,
-                        links=links
+                        url=final_url, requested_url=url, title=soup.title.get_text(" ", strip=True)
+                        if soup.title else final_url, html=str(soup),
+                        text=soup.get_text(" ", strip=True),
+                        status=response.status if response else 0, depth=depth, links=links,
                     )
-                    self.emit("page", saved, title, final_url)
-                    self.emit("status", f"Saved {len(visited)} pages; {len(queue)} queued.")
+                    self.library.set_queue_state(url, "saved")
+                    self.emit("page", saved, soup.title.get_text(" ", strip=True) if soup.title else final_url, final_url)
+                    self.emit("status", f"Saved {done} pages in this run; {len(queue)} queued.")
                 except Exception as exc:
                     self.library.save_failure(url, str(exc), depth)
                     self.emit("failure", url, str(exc))
@@ -158,6 +180,12 @@ class Archiver:
                         page.remove_listener("response", on_response)
                     except Exception:
                         pass
-                time.sleep(max(0.2, min(delay, 30)))
+                # Delay is interruptible so Stop and Pause respond promptly.
+                remaining = max(.2, min(delay, 30))
+                while remaining > 0 and not self.stop_event.is_set():
+                    self._wait_if_paused()
+                    interval = min(.2, remaining)
+                    self.stop_event.wait(interval)
+                    remaining -= interval
             context.close()
-        self.emit("status", f"Crawl stopped. Visited {len(visited)} pages; {len(queue)} remain queued.")
+        self.emit("status", f"Run ended. Processed {done} pages; {len(queue)} remain queued for resume.")
