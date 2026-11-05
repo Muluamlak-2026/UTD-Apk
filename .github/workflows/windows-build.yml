@@ -1,0 +1,38 @@
+name: Windows build
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Compile
+        run: python -m compileall -q offline_archiver launcher.py
+      - name: Test
+        run: pytest -q
+      - name: Package
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name OfflineArchiver --collect-all playwright --collect-all bs4 --collect-all PySide6 launcher.py
+          "Offline Archiver. Microsoft Edge must be installed. Data: %LOCALAPPDATA%\OfflineArchiver. Archive only content you are authorized to retain." | Out-File dist\README.txt
+          Compress-Archive -Path dist\OfflineArchiver\*,dist\README.txt -DestinationPath dist\OfflineArchiver-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OfflineArchiver-Windows-x64
+          path: dist/OfflineArchiver-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
