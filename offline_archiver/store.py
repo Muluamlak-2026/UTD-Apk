@@ -34,7 +34,7 @@ class Library:
                 CREATE TABLE IF NOT EXISTS pages(
                     id INTEGER PRIMARY KEY, url TEXT UNIQUE, requested_url TEXT, title TEXT,
                     html_path TEXT, text TEXT, status INTEGER, depth INTEGER, state TEXT,
-                    error TEXT, saved_at TEXT, sha256 TEXT
+                    error TEXT, saved_at TEXT, sha256 TEXT, completeness TEXT DEFAULT 'unknown', completeness_notes TEXT DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS links(source_id INTEGER, target_url TEXT);
                 CREATE TABLE IF NOT EXISTS assets(url TEXT PRIMARY KEY, path TEXT, sha256 TEXT, mime TEXT, size INTEGER);
@@ -45,6 +45,11 @@ class Library:
                 );
                 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(title, text);
             """)
+            page_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(pages)")}
+            if "completeness" not in page_columns:
+                self.db.execute("ALTER TABLE pages ADD COLUMN completeness TEXT DEFAULT 'unknown'")
+            if "completeness_notes" not in page_columns:
+                self.db.execute("ALTER TABLE pages ADD COLUMN completeness_notes TEXT DEFAULT ''")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_queue_state ON crawl_queue(state,id)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_pages_state ON pages(state,id)")
             # A process crash can leave a queue item marked running; safely retry it.
@@ -127,7 +132,8 @@ class Library:
         with self.lock:
             return {r["url"]: r["path"] for r in self.db.execute("SELECT url,path FROM assets")}
 
-    def save_page(self, url, requested_url, title, html, text, status, depth, links):
+    def save_page(self, url, requested_url, title, html, text, status, depth, links,
+                  completeness="unknown", completeness_notes=""):
         digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
         with self.lock:
             row = self.db.execute("SELECT id FROM pages WHERE url=?", (url,)).fetchone()
@@ -144,8 +150,9 @@ class Library:
             (self.pages_dir / filename).write_text(html, encoding="utf-8")
             self.db.execute(
                 """UPDATE pages SET requested_url=?,title=?,html_path=?,text=?,status=?,depth=?,
-                   state='saved',error=NULL,saved_at=?,sha256=? WHERE id=?""",
-                (requested_url, title, "pages/" + filename, text, status, depth, self.now(), digest, pid),
+                   state='saved',error=NULL,saved_at=?,sha256=?,completeness=?,completeness_notes=? WHERE id=?""",
+                (requested_url, title, "pages/" + filename, text, status, depth, self.now(), digest,
+                 completeness, completeness_notes[:4000], pid),
             )
             self.db.execute("DELETE FROM links WHERE source_id=?", (pid,))
             self.db.executemany("INSERT INTO links VALUES(?,?)", [(pid, x) for x in links])
@@ -190,7 +197,7 @@ class Library:
     def list_pages(self, limit=1000):
         with self.lock:
             rows = self.db.execute(
-                "SELECT id,title,url,html_path,state,status,saved_at FROM pages ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT id,title,url,html_path,state,status,saved_at,completeness,completeness_notes FROM pages ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(x) for x in rows]
 
@@ -281,7 +288,21 @@ class Library:
             counts["downloaded"] = self.db.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
             counts["assets"] = self.db.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
             counts["failures"] = self.db.execute("SELECT COUNT(*) FROM failures").fetchone()[0]
+            counts["incomplete"] = self.db.execute("SELECT COUNT(*) FROM pages WHERE completeness IN ('partial','incomplete')").fetchone()[0]
+            counts["attempted"] = self.db.execute("SELECT COUNT(*) FROM crawl_queue WHERE attempts>0 OR state!='pending'").fetchone()[0]
+            counts["redownloaded"] = self.db.execute("SELECT COUNT(*) FROM pages WHERE requested_url!=url").fetchone()[0]
         return counts
+
+    def retry_incomplete(self):
+        with self.lock, self.db:
+            rows = self.db.execute("SELECT url,depth FROM pages WHERE completeness IN ('partial','incomplete')").fetchall()
+            for row in rows:
+                self.db.execute(
+                    "INSERT INTO crawl_queue(url,depth,state,attempts,error,updated) VALUES(?,?,'pending',0,NULL,?) "
+                    "ON CONFLICT(url) DO UPDATE SET depth=excluded.depth,state='pending',error=NULL,updated=excluded.updated",
+                    (row["url"], row["depth"], self.now())
+                )
+            return len(rows)
 
     def add_url(self, url, depth=0):
         return self.enqueue(url, depth)
