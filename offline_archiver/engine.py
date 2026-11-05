@@ -64,7 +64,7 @@ class Archiver:
         self.emit("status", "Browser profile saved locally.")
 
     def crawl(self, start_url: str, max_pages: int = 100, max_depth: int = 3,
-              delay: float = 1.5, include_external: bool = False):
+              delay: float = 5.0, include_external: bool = False, cookies=None):
         start_url = canonical(start_url)
         if not start_url:
             raise ValueError("Enter a valid HTTP or HTTPS URL.")
@@ -76,6 +76,12 @@ class Archiver:
         done = 0
         with sync_playwright() as p:
             context = self._launch(p)
+            if cookies:
+                try:
+                    context.add_cookies(cookies)
+                    self.emit("status", "Imported " + str(len(cookies)) + " session cookies from the embedded browser profile.")
+                except Exception as exc:
+                    self.emit("status", "Some browser cookies could not be synchronized: " + str(exc))
             page = context.pages[0] if context.pages else context.new_page()
             while queue and done < max_pages and not self.stop_event.is_set():
                 self._wait_if_paused()
@@ -103,6 +109,13 @@ class Archiver:
                 page.on("response", on_response)
                 try:
                     response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    status = response.status if response else 0
+                    if status in (401, 403, 429):
+                        reason = "HTTP " + str(status) + ": access denied or rate limited. Automatic retries stopped; review the site account/session and contact the provider if needed."
+                        self.library.save_failure(url, reason, depth)
+                        self.emit("status", reason)
+                        self.stop_event.set()
+                        break
                     try:
                         page.wait_for_load_state("networkidle", timeout=12000)
                     except PlaywrightTimeoutError:
@@ -117,7 +130,7 @@ class Archiver:
                         previous = height;
                         for (let y=0; y<height; y+=step) {
                           window.scrollTo(0,y);
-                          await new Promise(r=>setTimeout(r,90));
+                          await new Promise(r=>setTimeout(r,120));
                         }
                         await new Promise(r=>setTimeout(r,250));
                       }
@@ -179,7 +192,7 @@ class Archiver:
                     except Exception:
                         pass
                 # Delay is interruptible so Stop and Pause respond promptly.
-                remaining = max(.2, min(delay, 30))
+                remaining = max(1.0, min(delay, 120))
                 while remaining > 0 and not self.stop_event.is_set():
                     self._wait_if_paused()
                     interval = min(.2, remaining)
