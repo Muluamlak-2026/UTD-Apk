@@ -83,6 +83,14 @@ class Library:
                 (state, error, int(increment), self.now(), url),
             )
 
+    def restore_passed(self):
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "UPDATE crawl_queue SET state='pending',error=NULL,updated=? WHERE state='passed'",
+                (self.now(),)
+            )
+            return cur.rowcount
+
     def retry_failed(self):
         with self.lock, self.db:
             cur = self.db.execute(
