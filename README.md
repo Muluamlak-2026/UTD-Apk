@@ -7,8 +7,8 @@ A Windows desktop offline website archiver with a persistent **embedded Chromium
 - **Browser & Sign-in:** embedded Chromium browser with its own persistent profile, address bar, back/forward/reload and manual sign-in. Cookies observed in this browser profile are synchronized to the capture worker for the selected site. No credentials are submitted by automation.
 - **Dashboard:** downloaded, pending, failed, passed, redownloaded, incomplete/JS, attempted and asset counters; page/depth/request-delay settings; start/resume, pause and safe stop.
 - **Queue & Six-list ledger:** downloaded pages remain in the library; pending, failed, passed and running URLs remain visible in the queue ledger. Add URLs, pass/skip with a reason, restore passed URLs, retry failures and force-redownload a selected URL.
-- **Search & Offline library:** FTS5 full-text search, saved-page listing and opening local HTML snapshots.
-- **Diagnostics & Export:** SHA-256 integrity verification, diagnostic report, archive folder access and portable ZIP export.
+- **Search & Offline library:** FTS5 full-text search, saved-page listing and opening local HTML snapshots in the built-in Offline Reader.
+- **Diagnostics & Export:** SHA-256 integrity verification, diagnostic report, archive folder access and portable ZIP export. Page rows record a completeness classification and notes; incomplete captures can be re-queued.
 
 ## Browser and session behavior
 
@@ -26,9 +26,9 @@ The app does not add Chromium's `--no-sandbox` flag or disable the browser sandb
 
 ## Capture coverage and known limits
 
-The crawler saves rendered HTML snapshots and observed GET-loaded image, font, audio/video, CSS, PDF and WASM resources within configured size limits. It discovers same-host links and triggers bounded lazy loading. It does not guarantee offline operation for POST/API-dependent content, cross-origin frames, service workers, streaming media, dynamically generated application state or content that requires interaction. CSS-relative dependencies and complex interactive pages require site-specific validation. A page being saved does not mean every control will work offline.
+The crawler saves rendered HTML snapshots and observed GET-loaded image, font, audio/video, CSS, JavaScript, PDF and WASM resources within configured size limits. It discovers same-site links recursively (including subdomains of the seed host); link depth `0` means unlimited, while the per-run page cap remains active. It triggers bounded lazy loading and preserves current form field values and canvas-rendered charts as a snapshot. Pages are classified as complete or partial with notes for detected iframes, POST forms, fetch/XHR endpoints, external scripts and uncaptured remote assets. A saved canvas is a static image, not a live calculator. Client-side calculators may work if all dependencies are local, but server/API-backed calculators, cross-origin frames, service workers, streaming media, dynamic state and interactions are not guaranteed offline. A page being saved does not mean every control will work offline.
 
-The incomplete-JS ledger counter is reserved in the dashboard, but automatic JS incompleteness classification and a dedicated retry queue are not yet fully implemented. This is a known limitation, not a claim of completed functionality.
+The completeness classifier is heuristic: it identifies common signs of missing dependencies but cannot prove that every control works offline. The incomplete-page retry action re-queues pages marked partial/incomplete. Do not treat this as certification of calculator functionality.
 
 ## Install and test
 
