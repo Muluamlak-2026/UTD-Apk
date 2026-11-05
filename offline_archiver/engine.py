@@ -15,7 +15,7 @@ from .store import Library
 
 MAX_RESOURCE_BYTES = 30 * 1024 * 1024
 ASSET_TYPES = ("image/", "font/", "audio/", "video/")
-ASSET_MIMES = {"text/css", "application/pdf", "application/wasm"}
+ASSET_MIMES = {"text/css", "application/pdf", "application/wasm", "text/javascript", "application/javascript", "application/x-javascript", "text/ecmascript", "application/ecmascript"}
 
 
 def canonical(url: str) -> str:
@@ -86,10 +86,16 @@ class Archiver:
                 done += 1
                 self.emit("progress", done, max_pages, url)
                 resources = {}
+                asset_issues = []
                 def on_response(response):
                     try:
                         req = response.request
-                        if req.method != "GET" or response.status >= 400:
+                        if req.method != "GET":
+                            return
+                        if response.status >= 400:
+                            if req.resource_type in ("script", "stylesheet", "image", "font", "media"):
+                                asset_issues.append({"url": response.url, "type": req.resource_type,
+                                                     "status": response.status, "error": "HTTP response error"})
                             return
                         mime = response.headers.get("content-type", "").split(";")[0].lower()
                         if not (mime.startswith(ASSET_TYPES) or mime in ASSET_MIMES):
@@ -100,7 +106,15 @@ class Archiver:
                         resources[canonical(response.url)] = self.library.save_asset(response.url, body, mime)
                     except Exception:
                         pass
+                def on_request_failed(request):
+                    try:
+                        if request.resource_type in ("script", "stylesheet", "image", "font", "media"):
+                            asset_issues.append({"url": request.url, "type": request.resource_type,
+                                                 "status": 0, "error": request.failure or "Request failed"})
+                    except Exception:
+                        pass
                 page.on("response", on_response)
+                page.on("requestfailed", on_request_failed)
                 try:
                     response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     try:
@@ -161,6 +175,11 @@ class Archiver:
                     # Add an archive provenance marker and preserve original URL.
                     if soup.html:
                         soup.html["data-archive-source"] = final_url
+                    # Record missing/broken browser-loaded dependencies instead of silently
+                    # declaring a page fully archived. This is especially important for calculators.
+                    for issue in asset_issues:
+                        self.library.save_asset_issue(final_url, issue["url"], issue["type"],
+                                                      issue["error"], issue["status"])
                     saved = self.library.save_page(
                         url=final_url, requested_url=url, title=soup.title.get_text(" ", strip=True)
                         if soup.title else final_url, html=str(soup),
@@ -176,6 +195,7 @@ class Archiver:
                 finally:
                     try:
                         page.remove_listener("response", on_response)
+                        page.remove_listener("requestfailed", on_request_failed)
                     except Exception:
                         pass
                 # Delay is interruptible so Stop and Pause respond promptly.
