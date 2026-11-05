@@ -63,10 +63,11 @@ class Library:
 
     def enqueue(self, url, depth):
         with self.lock, self.db:
-            self.db.execute(
+            cur = self.db.execute(
                 "INSERT OR IGNORE INTO crawl_queue(url,depth,state,updated) VALUES(?,?,'pending',?)",
                 (url, depth, self.now()),
             )
+            return cur.rowcount == 1
 
     def pending_queue(self, limit=10000):
         with self.lock:
