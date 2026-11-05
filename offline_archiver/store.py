@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib, json, mimetypes, sqlite3, threading, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse\nfrom bs4 import BeautifulSoup
 
 class Library:
     def __init__(self, root: Path):
@@ -65,9 +65,28 @@ class Library:
         with self.lock:
             return tuple(self.db.execute("SELECT COUNT(*) FROM "+t).fetchone()[0] for t in ("pages","assets","failures"))
     def export_zip(self,destination):
+        with self.lock:
+            rows=[dict(r) for r in self.db.execute("SELECT id,url,title,html_path FROM pages ORDER BY title COLLATE NOCASE").fetchall()]
+        local={r["url"]:Path(r["html_path"]).name for r in rows}
         with zipfile.ZipFile(destination,"w",zipfile.ZIP_DEFLATED,compresslevel=6) as z:
             for folder in (self.pages_dir,self.assets_dir):
                 for f in folder.rglob("*"):
-                    if f.is_file(): z.write(f,f.relative_to(self.root))
+                    if f.is_file():
+                        rel=f.relative_to(self.root)
+                        if folder==self.pages_dir:
+                            soup=BeautifulSoup(f.read_text(encoding="utf-8",errors="replace"),"html.parser")
+                            for a in soup.select("a[href]"):
+                                target=a.get("href","")
+                                if target in local:
+                                    a["href"]=local[target]
+                            z.writestr(str(rel),str(soup))
+                        else:
+                            z.write(f,rel)
+            links=[]
+            for row in rows:
+                label=(row["title"] or row["url"]).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                links.append(f'<li><a href="pages/{local[row["url"]]}">{label}</a><small> — {row["url"]}</small></li>')
+            index="<!doctype html><html><head><meta charset='utf-8'><title>Offline Archiver Library</title><style>body{font:16px Segoe UI,Arial;max-width:1000px;margin:40px auto;padding:0 20px;color:#172b4d}li{margin:12px 0}small{color:#667085}</style></head><body><h1>Offline Archiver Library</h1><p>Portable snapshot export. Some interactive or server-dependent features may require an online connection.</p><ol>"+ "".join(links)+"</ol></body></html>"
+            z.writestr("index.html",index)
             z.write(self.db_path,"library.sqlite3")
-            z.writestr("manifest.json",json.dumps({"format":"OfflineArchiverPortable","version":1,"generated":self.now(),"pages":self.stats()[0]},indent=2))
+            z.writestr("manifest.json",json.dumps({"format":"OfflineArchiverPortable","version":1,"generated":self.now(),"pages":len(rows)},indent=2))
