@@ -38,7 +38,7 @@ def test_persistent_queue_pass_and_retry(tmp_path: Path):
     assert len(lib.pending_queue()) == 2
     lib.set_queue_state("https://example.org/a", "running")
     lib.save_failure("https://example.org/a", "temporary error", 0)
-    assert len(lib.retry_failed()) == 1
+    assert lib.retry_failed() == 1
     assert {r["url"] for r in lib.pending_queue()} == {
         "https://example.org/a", "https://example.org/b"
     }
