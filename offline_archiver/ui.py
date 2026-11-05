@@ -274,7 +274,7 @@ class Window(QMainWindow):
         row=QHBoxLayout(); self.search=QLineEdit(); self.search.setPlaceholderText("Search saved pages and topic text")
         self.search_btn=QPushButton("Search"); self.refresh_btn=QPushButton("Show all saved pages")
         row.addWidget(self.search,1); row.addWidget(self.search_btn); row.addWidget(self.refresh_btn); layout.addLayout(row)
-        self.page_table=QTableWidget(0,4); self.page_table.setHorizontalHeaderLabels(["Title","URL","HTTP","Saved"])
+        self.page_table=QTableWidget(0,5); self.page_table.setHorizontalHeaderLabels(["Title","URL","HTTP","Saved","Offline completeness"])
         self.page_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
         self.page_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.Stretch)
         self.page_table.cellDoubleClicked.connect(self.open_page); layout.addWidget(self.page_table,1)
@@ -408,7 +408,7 @@ class Window(QMainWindow):
     def _fill_pages(self,rows):
         self.page_table.setRowCount(len(rows))
         for i,r in enumerate(rows):
-            vals=[r.get("title"),r.get("url"),r.get("status"),r.get("saved_at")]
+            vals=[r.get("title"),r.get("url"),r.get("status"),r.get("saved_at"),r.get("completeness","unknown")]
             for j,v in enumerate(vals): self.page_table.setItem(i,j,QTableWidgetItem(str(v or "")))
             self.page_table.item(i,0).setData(Qt.UserRole,r.get("html_path"))
 
@@ -451,7 +451,9 @@ class Window(QMainWindow):
         n=self.lib.retry_failed(); self.set_status(f"Re-queued {n} failed URLs. Start / Resume to continue."); self.refresh_all()
 
     def retry_incomplete(self):
-        self.set_status("Incomplete-JavaScript retry is not yet separately classified by the capture engine; inspect Diagnostics before retrying affected pages.")
+        n=self.lib.retry_incomplete()
+        self.set_status(f"Re-queued {n} incomplete pages. Start / Resume to recapture them; server-dependent functions may remain unavailable offline.")
+        self.refresh_all()
 
     def verify_library(self):
         issues=self.lib.verify()
