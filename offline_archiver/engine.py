@@ -135,10 +135,8 @@ class Archiver:
                             continue
                         if not include_external and urlparse(target).netloc != host:
                             continue
-                        if depth < max_depth:
-                            self.library.enqueue(target, depth + 1)
-                            if target not in {u for u, _ in queue}:
-                                queue.append((target, depth + 1))
+                        if depth < max_depth and self.library.enqueue(target, depth + 1):
+                            queue.append((target, depth + 1))
                         a["href"] = target
                         links.append(target)
                     # Rewrite captured resources to local paths. Keep unknowns absolute so the
