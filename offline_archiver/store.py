@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import posixpath
+import re
 import sqlite3
 import threading
 import zipfile
@@ -263,22 +265,50 @@ class Library:
                 "SELECT id,url,title,html_path FROM pages ORDER BY title COLLATE NOCASE"
             ).fetchall()]
             assets = [dict(r) for r in self.db.execute("SELECT url,path FROM assets").fetchall()]
-        local = {r["url"]: Path(r["html_path"]).name for r in rows}
+        def slug(value, fallback):
+            value = re.sub(r"[^A-Za-z0-9._-]+", "-", (value or "").strip()).strip("-._")
+            return (value[:72] or fallback)
+
+        # Mirror URL path hierarchy in the portable export, with collision-safe page IDs.
+        local = {}
+        for row in rows:
+            parsed = urlparse(row["url"])
+            host = slug(parsed.netloc.lower(), "site")
+            segments = [slug(x, "section") for x in parsed.path.strip("/").split("/") if x]
+            if segments and "." in segments[-1]:
+                leaf = segments.pop()
+            else:
+                leaf = slug(row["title"], "page")
+            folder = "/".join(["pages", host, *segments])
+            local[row["url"]] = f"{folder}/{leaf}-{row['id']:08d}.html"
         asset_local = {r["url"]: r["path"] for r in assets}
         with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
             for row in rows:
                 source = self.root / row["html_path"]
                 soup = BeautifulSoup(source.read_text(encoding="utf-8", errors="replace"), "html.parser")
+                destination_path = local[row["url"]]
+                destination_dir = posixpath.dirname(destination_path)
                 for a in soup.select("a[href]"):
                     target = a.get("href", "")
                     if target in local:
-                        a["href"] = local[target]
+                        a["href"] = posixpath.relpath(local[target], destination_dir)
                 for el in soup.select("[src],link[href],source[src],video[poster]"):
                     for attr in ("src", "href", "poster"):
                         value = el.get(attr)
                         if value in asset_local:
-                            el[attr] = "../" + asset_local[value]
-                z.writestr(row["html_path"], str(soup))
+                            el[attr] = posixpath.relpath(asset_local[value], destination_dir)
+                        elif isinstance(value, str) and value.startswith("../assets/"):
+                            el[attr] = posixpath.relpath(value[3:], destination_dir)
+                for el in soup.select("[srcset]"):
+                    parts = []
+                    for item in el.get("srcset", "").split(","):
+                        bits = item.strip().split()
+                        if bits:
+                            if bits[0].startswith("../assets/"):
+                                bits[0] = posixpath.relpath(bits[0][3:], destination_dir)
+                            parts.append(" ".join(bits))
+                    el["srcset"] = ", ".join(parts)
+                z.writestr(destination_path, str(soup))
             for folder in (self.assets_dir,):
                 for f in folder.rglob("*"):
                     if f.is_file():
@@ -286,7 +316,7 @@ class Library:
             links = []
             for row in rows:
                 label = (row["title"] or row["url"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                links.append(f'<li><a href="pages/{local[row["url"]]}">{label}</a><small> — {row["url"]}</small></li>')
+                links.append(f'<li><a href="{local[row["url"]]}">{label}</a><small> — {row["url"]}</small></li>')
             index = (
                 "<!doctype html><html><head><meta charset='utf-8'><title>Offline Archiver Library</title>"
                 "<style>body{font:16px Segoe UI,Arial;max-width:1000px;margin:40px auto;padding:0 20px;color:#172b4d}"
