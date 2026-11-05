@@ -69,3 +69,21 @@ def test_running_queue_items_recover_after_restart(tmp_path: Path):
     pending = reopened.pending_queue()
     assert len(pending) == 1
     assert pending[0]["url"] == "https://example.org/interrupted"
+
+
+
+def test_queue_ledger_add_pass_reason_and_force_redownload(tmp_path: Path):
+    lib = Library(tmp_path / "lib")
+    url = "https://example.org/topic"
+    assert lib.add_url(url, 0) is True
+    assert lib.add_url(url, 0) is False
+    lib.pass_url(url)
+    lib.set_queue_state(url, "passed", "User skipped this topic")
+    row = lib.queue_items("passed")[0]
+    assert row["url"] == url
+    assert row["error"] == "User skipped this topic"
+    assert lib.restore_passed() == 1
+    assert lib.pending_queue()[0]["url"] == url
+    lib.force_redownload(url, 2)
+    row = lib.queue_items("pending")[0]
+    assert row["depth"] == 2
