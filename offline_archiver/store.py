@@ -47,6 +47,11 @@ class Library:
             """)
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_queue_state ON crawl_queue(state,id)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_pages_state ON pages(state,id)")
+            # A process crash can leave a queue item marked running; safely retry it.
+            self.db.execute(
+                "UPDATE crawl_queue SET state='pending',error='Recovered after interrupted run',updated=? WHERE state='running'",
+                (self.now(),)
+            )
             # Rebuild FTS from canonical page rows to repair old duplicate/misaligned rowids.
             self.db.execute("DELETE FROM pages_fts")
             self.db.execute("INSERT INTO pages_fts(rowid,title,text) SELECT id,title,text FROM pages")
