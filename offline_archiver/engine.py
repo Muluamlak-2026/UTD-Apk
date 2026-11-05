@@ -44,7 +44,7 @@ class Archiver:
 
     def _launch(self, p):
         return p.chromium.launch_persistent_context(
-            str(self.profile_dir), channel="msedge", headless=False, accept_downloads=True,
+            str(self.profile_dir), channel="msedge", headless=True, accept_downloads=True,
             viewport={"width": 1440, "height": 900}, service_workers="allow",
             args=["--disable-features=msEdgeSidebarV2"],
         )
