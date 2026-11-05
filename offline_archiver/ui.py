@@ -170,6 +170,9 @@ class Window(QMainWindow):
         self.tabs.addTab(self._dashboard_tab(), "Dashboard")
         self.tabs.addTab(self._queue_tab(), "Queue & Six-list ledger")
         self.tabs.addTab(self._library_tab(), "Search & Offline library")
+        self.reader = QWebEngineView()
+        self.reader.setPage(QWebEnginePage(self.browser.profile, self.reader))
+        self.tabs.addTab(self.reader, "Offline Reader")
         self.tabs.addTab(self._diagnostics_tab(), "Diagnostics & Export")
 
         self.setCentralWidget(root)
@@ -214,11 +217,11 @@ class Window(QMainWindow):
         form.addWidget(self.storage_label,2,1,1,4)
         form.addWidget(self.storage_btn,2,5)
         self.pages = QSpinBox(); self.pages.setRange(1,10000); self.pages.setValue(500)
-        self.depth = QSpinBox(); self.depth.setRange(0,20); self.depth.setValue(5)
+        self.depth = QSpinBox(); self.depth.setRange(0,20); self.depth.setValue(0)
         self.delay = QDoubleSpinBox(); self.delay.setRange(1,120); self.delay.setValue(5.0); self.delay.setSuffix(" sec")
         form.addWidget(QLabel("Start URL"),0,0); form.addWidget(self.url,0,1,1,5)
         form.addWidget(QLabel("Max pages / run"),1,0); form.addWidget(self.pages,1,1)
-        form.addWidget(QLabel("Link depth"),1,2); form.addWidget(self.depth,1,3)
+        form.addWidget(QLabel("Link depth (0 = unlimited)"),1,2); form.addWidget(self.depth,1,3)
         form.addWidget(QLabel("Delay between pages"),1,4); form.addWidget(self.delay,1,5)
         layout.addLayout(form)
         controls=QHBoxLayout()
@@ -419,7 +422,9 @@ class Window(QMainWindow):
         item=self.page_table.item(row,0)
         if item:
             path=self.site_root/"library"/(item.data(Qt.UserRole) or "")
-            if path.is_file(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            if path.is_file():
+                self.reader.load(QUrl.fromLocalFile(str(path.resolve())))
+                self.tabs.setCurrentWidget(self.reader)
 
     def add_to_queue(self):
         url=self.add_url.text().strip()
