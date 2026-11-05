@@ -39,6 +39,10 @@ class Library:
                 CREATE TABLE IF NOT EXISTS links(source_id INTEGER, target_url TEXT);
                 CREATE TABLE IF NOT EXISTS assets(url TEXT PRIMARY KEY, path TEXT, sha256 TEXT, mime TEXT, size INTEGER);
                 CREATE TABLE IF NOT EXISTS failures(id INTEGER PRIMARY KEY, url TEXT, error TEXT, depth INTEGER, created TEXT);
+                CREATE TABLE IF NOT EXISTS asset_issues(
+                    id INTEGER PRIMARY KEY, page_url TEXT, asset_url TEXT, resource_type TEXT,
+                    error TEXT, http_status INTEGER, created TEXT
+                );
                 CREATE TABLE IF NOT EXISTS crawl_queue(
                     id INTEGER PRIMARY KEY, url TEXT UNIQUE, depth INTEGER, state TEXT DEFAULT 'pending',
                     attempts INTEGER DEFAULT 0, error TEXT, updated TEXT
@@ -127,7 +131,35 @@ class Library:
         with self.lock:
             return {r["url"]: r["path"] for r in self.db.execute("SELECT url,path FROM assets")}
 
-    def save_page(self, url, requested_url, title, html, text, status, depth, links):
+    def save_asset_issue(self, page_url, asset_url, resource_type, error, http_status=0):
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO asset_issues(page_url,asset_url,resource_type,error,http_status,created) VALUES(?,?,?,?,?,?)",
+                (page_url, asset_url, resource_type, str(error)[:2000], int(http_status or 0), self.now()),
+            )
+
+    def list_asset_issues(self, limit=2000):
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT page_url,asset_url,resource_type,error,http_status,created FROM asset_issues ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()]
+
+    def list_queue(self, state=None, limit=2000):
+        with self.lock:
+            if state:
+                rows = self.db.execute(
+                    "SELECT url,depth,state,attempts,error,updated FROM crawl_queue WHERE state=? ORDER BY id DESC LIMIT ?",
+                    (state, limit),
+                ).fetchall()
+            else:
+                rows = self.db.execute(
+                    "SELECT url,depth,state,attempts,error,updated FROM crawl_queue ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def save_page(self, url, requested_url, title, html, text, status, depth, links, incomplete=False):
         digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
         with self.lock:
             row = self.db.execute("SELECT id FROM pages WHERE url=?", (url,)).fetchone()
@@ -137,15 +169,16 @@ class Library:
                 cur = self.db.execute(
                     """INSERT INTO pages(url,requested_url,title,html_path,text,status,depth,state,saved_at,sha256)
                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (url, requested_url, title, "", text, status, depth, "saved", self.now(), digest),
+                    (url, requested_url, title, "", text, status, depth, "incomplete" if incomplete else "saved", self.now(), digest),
                 )
                 pid = cur.lastrowid
             filename = f"{pid:08d}.html"
             (self.pages_dir / filename).write_text(html, encoding="utf-8")
             self.db.execute(
                 """UPDATE pages SET requested_url=?,title=?,html_path=?,text=?,status=?,depth=?,
-                   state='saved',error=NULL,saved_at=?,sha256=? WHERE id=?""",
-                (requested_url, title, "pages/" + filename, text, status, depth, self.now(), digest, pid),
+                   state=?,error=NULL,saved_at=?,sha256=? WHERE id=?""",
+                (requested_url, title, "pages/" + filename, text, status, depth,
+                 "incomplete" if incomplete else "saved", self.now(), digest, pid),
             )
             self.db.execute("DELETE FROM links WHERE source_id=?", (pid,))
             self.db.executemany("INSERT INTO links VALUES(?,?)", [(pid, x) for x in links])
