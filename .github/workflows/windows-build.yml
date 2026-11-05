@@ -28,14 +28,18 @@ jobs:
         run: pytest -q
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
-      - name: Package
+      - name: Package application and installer
+        shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --windowed --name OfflineArchiver --collect-all playwright --collect-all bs4 --collect-all PySide6 launcher.py
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\OfflineArchiver.iss
           "Offline Archiver. Microsoft Edge must be installed. Data: %LOCALAPPDATA%\OfflineArchiver. Archive only content you are authorized to retain." | Out-File dist\README.txt
           Compress-Archive -Path dist\OfflineArchiver\*,dist\README.txt -DestinationPath dist\OfflineArchiver-Windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: OfflineArchiver-Windows-x64
-          path: dist/OfflineArchiver-Setup-x64.exe\n            dist/OfflineArchiver-Windows-x64.zip
+          path: |
+            dist/OfflineArchiver-Setup-x64.exe
+            dist/OfflineArchiver-Windows-x64.zip
           if-no-files-found: error
           retention-days: 14
