@@ -15,7 +15,7 @@ from .store import Library
 
 MAX_RESOURCE_BYTES = 30 * 1024 * 1024
 ASSET_TYPES = ("image/", "font/", "audio/", "video/")
-ASSET_MIMES = {"text/css", "application/pdf", "application/wasm"}
+ASSET_MIMES = {"text/css", "text/javascript", "application/javascript", "application/x-javascript", "application/pdf", "application/wasm"}
 
 
 def canonical(url: str) -> str:
