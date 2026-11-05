@@ -56,3 +56,16 @@ def test_integrity_verification(tmp_path: Path):
     page = lib.pages_dir / "00000001.html"
     page.write_text("tampered", encoding="utf-8")
     assert any("Hash mismatch" in problem for problem in lib.verify())
+
+
+def test_running_queue_items_recover_after_restart(tmp_path: Path):
+    root = tmp_path / "lib"
+    lib = Library(root)
+    lib.enqueue("https://example.org/interrupted", 2)
+    lib.set_queue_state("https://example.org/interrupted", "running")
+    lib.db.close()
+
+    reopened = Library(root)
+    pending = reopened.pending_queue()
+    assert len(pending) == 1
+    assert pending[0]["url"] == "https://example.org/interrupted"
