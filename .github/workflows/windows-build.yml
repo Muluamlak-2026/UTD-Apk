@@ -1,7 +1,7 @@
 name: UTD-Apk · Windows desktop application
 on:
   push:
-    branches: [main]
+    branches: [main, feature/embedded-browser-full-dashboard]
     tags: ["v*"]
   pull_request:
     branches: [main]
