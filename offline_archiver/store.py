@@ -41,6 +41,7 @@ class Library:
                 CREATE TABLE IF NOT EXISTS links(source_id INTEGER, target_url TEXT);
                 CREATE TABLE IF NOT EXISTS assets(url TEXT PRIMARY KEY, path TEXT, sha256 TEXT, mime TEXT, size INTEGER);
                 CREATE TABLE IF NOT EXISTS failures(id INTEGER PRIMARY KEY, url TEXT, error TEXT, depth INTEGER, created TEXT);
+                CREATE TABLE IF NOT EXISTS bookmarks(url TEXT PRIMARY KEY, title TEXT, created TEXT);
                 CREATE TABLE IF NOT EXISTS crawl_queue(
                     id INTEGER PRIMARY KEY, url TEXT UNIQUE, depth INTEGER, state TEXT DEFAULT 'pending',
                     attempts INTEGER DEFAULT 0, error TEXT, updated TEXT
@@ -367,6 +368,45 @@ class Library:
                 "format": "OfflineArchiverPortable", "version": 3, "generated": self.now(),
                 "pages": len(rows), "assets": len(assets)
             }, indent=2))
+
+    def list_bookmarks(self):
+        with self.lock:
+            return [dict(r) for r in self.db.execute("SELECT url,title,created FROM bookmarks ORDER BY title COLLATE NOCASE").fetchall()]
+
+    def toggle_bookmark(self, url, title):
+        with self.lock, self.db:
+            exists = self.db.execute("SELECT 1 FROM bookmarks WHERE url=?", (url,)).fetchone()
+            if exists:
+                self.db.execute("DELETE FROM bookmarks WHERE url=?", (url,))
+                return False
+            self.db.execute("INSERT INTO bookmarks(url,title,created) VALUES(?,?,?)", (url, title, self.now()))
+            return True
+
+    def clear_history_and_data(self):
+        """Delete archive contents and crawl history; preserve embedded-browser sign-in data."""
+        with self.lock, self.db:
+            for table in ("links","pages_fts","pages","assets","failures","crawl_queue","bookmarks","sites"):
+                self.db.execute("DELETE FROM " + table)
+        for folder in (self.pages_dir, self.assets_dir):
+            if folder.exists():
+                import shutil
+                for item in folder.iterdir():
+                    if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
+                    else: item.unlink(missing_ok=True)
+        self.pages_dir.mkdir(parents=True, exist_ok=True)
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
+
+    def export_html_folder(self, destination):
+        """Export portable HTML pages, local assets, and a searchable index as a folder."""
+        import tempfile
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / "portable.zip"
+            self.export_zip(archive)
+            with zipfile.ZipFile(archive, "r") as z:
+                z.extractall(destination)
+        return destination
 
     def queue_items(self, state=None, limit=5000):
         with self.lock:
