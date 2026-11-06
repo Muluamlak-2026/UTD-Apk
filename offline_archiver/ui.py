@@ -6,7 +6,7 @@ import re
 import sys
 import threading
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from PySide6.QtCore import QThread, Signal, QUrl, Qt
 from PySide6.QtGui import QDesktopServices
@@ -171,9 +171,7 @@ class Window(QMainWindow):
         self.tabs.addTab(self._dashboard_tab(), "Dashboard")
         self.tabs.addTab(self._queue_tab(), "Queue & Six-list ledger")
         self.tabs.addTab(self._library_tab(), "Search & Offline library")
-        self.reader = QWebEngineView()
-        self.reader.setPage(QWebEnginePage(self.browser.profile, self.reader))
-        self.tabs.addTab(self.reader, "Offline Reader")
+        self.tabs.addTab(self._reader_tab(), "Offline Reader")
         self.tabs.addTab(self._diagnostics_tab(), "Diagnostics & Export")
 
         self.setCentralWidget(root)
@@ -286,15 +284,80 @@ class Window(QMainWindow):
         self.refresh_btn.clicked.connect(self.refresh_pages)
         return w
 
+    def _reader_tab(self):
+        w = QWidget(); layout = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        self.reader_bookmark_btn = QPushButton("Bookmark selected topic")
+        self.reader_refresh_btn = QPushButton("Refresh topic tree")
+        bar.addWidget(self.reader_bookmark_btn); bar.addWidget(self.reader_refresh_btn); layout.addLayout(bar)
+        split = QSplitter(Qt.Horizontal)
+        self.topic_tree = QTreeWidget(); self.topic_tree.setHeaderLabel("Saved topics and bookmarks")
+        self.reader = QWebEngineView(); self.reader.setPage(QWebEnginePage(self.browser.profile, self.reader))
+        split.addWidget(self.topic_tree); split.addWidget(self.reader); split.setStretchFactor(1, 3)
+        layout.addWidget(split, 1)
+        self.topic_tree.itemDoubleClicked.connect(self.open_topic_tree_item)
+        self.reader_bookmark_btn.clicked.connect(self.toggle_selected_bookmark)
+        self.reader_refresh_btn.clicked.connect(self.refresh_topic_tree)
+        return w
+
+    def refresh_topic_tree(self):
+        if not hasattr(self, "topic_tree"): return
+        self.topic_tree.clear()
+        pages = self.lib.list_pages(limit=10000)
+        root = self.topic_tree.invisibleRootItem()
+        saved_root = QTreeWidgetItem(["Saved topic hierarchy"]); root.addChild(saved_root)
+        for page in sorted(pages, key=lambda p: ((p.get("title") or "").casefold(), p["url"])):
+            parsed = urlparse(page["url"])
+            segments = [unquote(x) for x in parsed.path.split("/") if x]
+            if segments and segments[0].lower() == "contents": segments = segments[1:]
+            parent = saved_root
+            for segment in segments[:-1]:
+                label = segment.replace("-", " ").replace("_", " ").strip().title() or parsed.netloc
+                found = None
+                for i in range(parent.childCount()):
+                    if parent.child(i).text(0) == label and parent.child(i).data(0, Qt.UserRole) is None:
+                        found = parent.child(i); break
+                if found is None:
+                    found = QTreeWidgetItem([label]); parent.addChild(found)
+                parent = found
+            label = page.get("title") or (segments[-1] if segments else page["url"])
+            leaf = QTreeWidgetItem([label]); leaf.setData(0, Qt.UserRole, page["url"]); parent.addChild(leaf)
+        bookmark_root = QTreeWidgetItem(["Bookmarks"]); root.addChild(bookmark_root)
+        for mark in self.lib.list_bookmarks():
+            item = QTreeWidgetItem([mark["title"] or mark["url"]])
+            item.setData(0, Qt.UserRole, mark["url"]); bookmark_root.addChild(item)
+        self.topic_tree.expandToDepth(1)
+
+    def open_topic_tree_item(self, item, column=0):
+        url = item.data(0, Qt.UserRole)
+        if not url: return
+        page = next((p for p in self.lib.list_pages(limit=10000) if p["url"] == url), None)
+        if page:
+            path = self.site_root / "library" / page["html_path"]
+            if path.is_file(): self.reader.load(QUrl.fromLocalFile(str(path.resolve())))
+
+    def toggle_selected_bookmark(self):
+        item = self.topic_tree.currentItem() if hasattr(self, "topic_tree") else None
+        url = item.data(0, Qt.UserRole) if item else None
+        if not url:
+            QMessageBox.information(self, "Bookmark", "Select a saved topic first."); return
+        added = self.lib.toggle_bookmark(url, item.text(0))
+        self.set_status("Topic bookmarked." if added else "Bookmark removed.")
+        self.refresh_topic_tree()
+
     def _diagnostics_tab(self):
         w=QWidget(); layout=QVBoxLayout(w)
         buttons=QHBoxLayout()
         self.verify_btn=QPushButton("Verify archive integrity"); self.export_btn=QPushButton("Export portable ZIP")
+        self.html_export_btn=QPushButton("Export standalone HTML folder")
+        self.clear_data_btn=QPushButton("Clear history & downloaded data…")
         self.open_archive_btn=QPushButton("Open archive folder"); self.report_btn=QPushButton("Save diagnostic report")
-        for b in (self.verify_btn,self.export_btn,self.open_archive_btn,self.report_btn): buttons.addWidget(b)
+        for b in (self.verify_btn,self.export_btn,self.html_export_btn,self.open_archive_btn,self.report_btn,self.clear_data_btn): buttons.addWidget(b)
         layout.addLayout(buttons)
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setPlaceholderText("Recent activity and diagnostics"); layout.addWidget(self.log,1)
         self.verify_btn.clicked.connect(self.verify_library); self.export_btn.clicked.connect(self.export)
+        self.html_export_btn.clicked.connect(self.export_html_folder)
+        self.clear_data_btn.clicked.connect(self.clear_history_and_data)
         self.open_archive_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.site_root / "library"))))
         self.report_btn.clicked.connect(self.save_report)
         return w
@@ -394,7 +457,7 @@ class Window(QMainWindow):
         counts=self.lib.queue_stats()
         for key in self.metrics:
             self.metrics[key].setText(str(counts.get(key,0)))
-        self.refresh_queue(); self.refresh_pages()
+        self.refresh_queue(); self.refresh_pages(); self.refresh_topic_tree()
 
     def refresh_queue(self):
         state=self.ledger_filter.currentText() if hasattr(self,"ledger_filter") else "all"
@@ -472,6 +535,31 @@ class Window(QMainWindow):
         if path:
             try: self.lib.export_zip(Path(path)); QMessageBox.information(self,"Export","Portable ZIP export completed.")
             except Exception as exc: QMessageBox.critical(self,"Export error",str(exc))
+
+    def export_html_folder(self):
+        path=QFileDialog.getExistingDirectory(self,"Choose destination for standalone HTML export",str(self.site_root / "HTML-Export"))
+        if not path: return
+        try:
+            self.lib.export_html_folder(Path(path))
+            QMessageBox.information(self,"HTML export","Standalone HTML pages, local assets and searchable index exported to:\n"+path+"\nOpen index.html in Edge, Chrome or Firefox.")
+            self.set_status("Standalone HTML folder export completed.")
+        except Exception as exc:
+            QMessageBox.critical(self,"HTML export error",str(exc))
+
+    def clear_history_and_data(self):
+        if self.task and self.task.isRunning():
+            QMessageBox.warning(self,"Download active","Stop the current download before clearing archive data."); return
+        message = ("This permanently deletes ALL downloaded HTML pages, saved assets, bookmarks, crawl queue, failures and archive history for this website.\n\n"
+                   "Your embedded-browser sign-in profile and other websites' archives are preserved.\n\n"
+                   "This cannot be undone. Continue?")
+        answer=QMessageBox.warning(self,"Permanently clear archive data",message,QMessageBox.Yes | QMessageBox.No,QMessageBox.No)
+        if answer != QMessageBox.Yes: return
+        try:
+            self.lib.clear_history_and_data()
+            self.refresh_all()
+            self.set_status("Downloaded pages, assets, bookmarks and crawl history were cleared for this website. Browser sign-in was preserved.")
+        except Exception as exc:
+            QMessageBox.critical(self,"Clear data error",str(exc))
 
     def save_report(self):
         path,_=QFileDialog.getSaveFileName(self,"Save diagnostics","OfflineArchiver-diagnostics.txt","Text (*.txt)")
