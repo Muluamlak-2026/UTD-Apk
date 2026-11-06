@@ -143,6 +143,15 @@ class Archiver:
                 if done >= settings["max_pages"]:
                     break
                 url, depth = queue.popleft()
+                # Refresh the worker's site cookies from the still-open embedded
+                # browser before each page, so session renewal is not frozen at Start.
+                if cookies_provider:
+                    try:
+                        latest_cookies = cookies_provider()
+                        if latest_cookies:
+                            await context.add_cookies(latest_cookies)
+                    except Exception as cookie_error:
+                        self.emit("status", "Could not refresh embedded-browser cookies: " + str(cookie_error)[:240])
                 done += 1
                 self.emit("progress", done, settings["max_pages"], url)
                 for attempt in range(1, 4):
@@ -159,13 +168,23 @@ class Archiver:
                         # "Accept All" control before the snapshot is captured.
                         await accept_cookie_consent(page)
                         status = response.status if response else 0
-                        if status in (401, 403, 429):
+                        if status == 403:
+                            # A 403 for one URL is not proof that the user's embedded
+                            # session has expired. Record this URL as inaccessible and
+                            # continue the already-persisted queue; never try to bypass it.
+                            reason = (
+                                "HTTP 403 for this page; it was recorded in Failed and skipped. "
+                                "The embedded browser session is not assumed to be logged out; "
+                                "the remaining authorized queue will continue."
+                            )
+                            self.library.save_failure(url, reason, depth)
+                            self.emit("status", reason)
+                            break
+                        if status in (401, 429):
                             if status == 429:
                                 reason = "HTTP 429 rate limit: crawl paused safely. The remaining queue is preserved; wait for the provider's retry window, then use Start / Resume."
-                            elif status == 401:
-                                reason = "HTTP 401 authentication required: crawl paused safely. Sign in again in the embedded browser, then use Start / Resume."
                             else:
-                                reason = "HTTP 403 access denied: crawl paused safely. Check the account's access/permissions in the embedded browser; no automatic retry was attempted. The remaining queue is preserved."
+                                reason = "HTTP 401 authentication required: crawl paused safely. Sign in again in the embedded browser, then use Start / Resume."
                             self.library.save_failure(url, reason, depth)
                             self.halt_reason = reason
                             self.emit("status", reason)
