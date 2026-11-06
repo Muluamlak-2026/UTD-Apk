@@ -27,8 +27,19 @@ def test_save_search_update_and_export(tmp_path: Path):
     lib.export_zip(out)
     assert out.exists() and out.stat().st_size > 0
     with zipfile.ZipFile(out) as archive:
-        assert "index.html" in archive.namelist()
-        assert "pages/00000001.html" in archive.namelist()
+        names = archive.namelist()
+        assert "index.html" in names
+        # Portable exports preserve the original host/path hierarchy and use
+        # collision-safe page IDs rather than flattening every page to one name.
+        exported_pages = [
+            name for name in names
+            if name.startswith("pages/example.org/topic/") and name.endswith(".html")
+        ]
+        assert len(exported_pages) == 1
+        assert "Updated-topic-00000001.html" in exported_pages[0]
+        assert "manifest.json" in names
+        index = archive.read("index.html").decode("utf-8")
+        assert exported_pages[0] in index
 
 
 def test_persistent_queue_pass_and_retry(tmp_path: Path):
