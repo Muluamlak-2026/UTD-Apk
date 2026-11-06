@@ -85,11 +85,9 @@ class Archiver:
         url = canonical(url)
         if not url:
             raise ValueError("Enter a valid HTTP or HTTPS URL.")
-        manager = await async_playwright().start()
-        p = manager
-        context = await self._launch(p)
-        page = context.pages[0] if context.pages else await context.new_page()
-        try:
+        async with async_playwright() as p:
+            context = await self._launch(p)
+            page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             self.emit("status", "Sign in manually in Edge. MFA/CAPTCHA remain interactive. Stop when finished.")
             while not self.stop_event.wait(.3):
@@ -123,9 +121,11 @@ class Archiver:
                 "delay": max(0.2, min(120.0, float(current.get("delay", delay)))),
             }
 
-        async with async_playwright() as p:
-            context = await self._launch(p)
-            page = context.pages[0] if context.pages else await context.new_page()
+        manager = await async_playwright().start()
+        p = manager
+        context = await self._launch(p)
+        page = context.pages[0] if context.pages else await context.new_page()
+        try:
             # Transfer the manually established embedded-browser session once, before
             # crawling. Repeated cross-browser cookie synchronization was destabilizing
             # the Playwright driver on long runs. To refresh authentication, pause/stop,
@@ -154,7 +154,7 @@ class Archiver:
                         observed_responses.append(response)
                     page.on("response", on_response)
                     try:
-                    response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                        response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     # User-requested consent handling: click only an explicit
                     # "Accept All" control before the snapshot is captured.
                     await accept_cookie_consent(page)
@@ -338,7 +338,7 @@ class Archiver:
                     self.library.set_queue_state(url, "saved")
                     self.emit("page", saved, soup.title.get_text(" ", strip=True) if soup.title else final_url, final_url)
                     self.emit("status", f"Saved {done} pages in this run; {len(queue)} queued.")
-                except Exception as exc:
+                    except Exception as exc:
                     error_text = str(exc)
                     lower_error = error_text.lower()
                     driver_lost = any(marker in lower_error for marker in (
@@ -387,7 +387,7 @@ class Archiver:
                         continue
                     self.library.save_failure(url, error_text, depth)
                     self.emit("failure", url, f"Failed after 3 attempts: {error_text}")
-                finally:
+                    finally:
                     try:
                         page.remove_listener("response", on_response)
                     except Exception:
