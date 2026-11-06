@@ -4,8 +4,9 @@ import os
 import sys
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
-from PySide6.QtCore import QThread, Signal, QUrl
+from PySide6.QtCore import QThread, Signal, QUrl, QSettings
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import *
 
@@ -18,16 +19,25 @@ def home():
     return path
 
 
+def default_destination(url: str = "") -> Path:
+    """Use a stable per-site archive directory unless the user selects another folder."""
+    host = urlparse(url).netloc.lower().replace(":", "_") or "New-Site"
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in host)
+    return home() / "Sites" / safe
+
+
 class Task(QThread):
     status = Signal(str)
     progress = Signal(int, int, str)
     page = Signal(int, str, str)
 
-    def __init__(self, mode, url, opts=None):
+    def __init__(self, mode, url, destination, opts=None):
         super().__init__()
         self.mode, self.url, self.opts = mode, url, opts or {}
+        self.destination = Path(destination)
+        self.destination.mkdir(parents=True, exist_ok=True)
         self.stop_event, self.pause_event = threading.Event(), threading.Event()
-        self.engine = Archiver(home(), self.emit_event, self.stop_event, self.pause_event)
+        self.engine = Archiver(self.destination, self.emit_event, self.stop_event, self.pause_event)
 
     def emit_event(self, kind, *args):
         if kind == "status":
@@ -59,7 +69,9 @@ class Window(QMainWindow):
         self.setWindowTitle("Offline Archiver")
         self.resize(1240, 820)
         self.task = None
-        self.lib = Archiver(home(), lambda *args: None, threading.Event(), threading.Event()).library
+        self.settings = QSettings("HealthDataET", "OfflineArchiver")
+        self.destination = self.destination_for_url("")
+        self.lib = Archiver(self.destination, lambda *args: None, threading.Event(), threading.Event()).library
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -75,7 +87,18 @@ class Window(QMainWindow):
 
         self.url = QLineEdit()
         self.url.setPlaceholderText("Authorized website or topic URL")
+        self.url.textChanged.connect(self.suggest_site_folder)
         layout.addWidget(self.url)
+
+        destination_row = QHBoxLayout()
+        self.destination_edit = QLineEdit(str(self.destination))
+        self.destination_edit.setReadOnly(True)
+        self.browse_btn = QPushButton("Browse / Select archive folder…")
+        self.browse_btn.clicked.connect(self.choose_destination)
+        destination_row.addWidget(QLabel("Save archive to"))
+        destination_row.addWidget(self.destination_edit, 1)
+        destination_row.addWidget(self.browse_btn)
+        layout.addLayout(destination_row)
 
         options = QHBoxLayout()
         self.pages = QSpinBox()
@@ -95,9 +118,10 @@ class Window(QMainWindow):
         controls = QHBoxLayout()
         self.login = QPushButton("Open sign-in browser")
         self.crawl = QPushButton("Start / Resume")
+        self.next_page = QPushButton("Next page")
         self.pause = QPushButton("Pause")
         self.stop = QPushButton("Stop")
-        for button in (self.login, self.crawl, self.pause, self.stop):
+        for button in (self.login, self.crawl, self.next_page, self.pause, self.stop):
             controls.addWidget(button)
         layout.addLayout(controls)
 
@@ -138,6 +162,8 @@ class Window(QMainWindow):
         """)
 
         self.login.clicked.connect(lambda: self.start("login"))
+        self.next_page.clicked.connect(lambda: self.start("crawl", one_page=True))
+        self.browse_btn.clicked.connect(self.choose_destination)
         self.crawl.clicked.connect(lambda: self.start("crawl"))
         self.stop.clicked.connect(self.stop_task)
         self.pause.clicked.connect(self.pause_task)
@@ -151,7 +177,7 @@ class Window(QMainWindow):
         self.verify_btn.clicked.connect(self.verify_library)
         self.refresh()
 
-    def start(self, mode):
+    def start(self, mode, one_page=False):
         if self.task and self.task.isRunning():
             QMessageBox.information(self, "Busy", "Stop the current task first.")
             return
@@ -159,12 +185,48 @@ class Window(QMainWindow):
         if not url.startswith(("http://", "https://")):
             QMessageBox.warning(self, "URL", "Enter a valid HTTP or HTTPS URL.")
             return
-        opts = {"max_pages": self.pages.value(), "max_depth": self.depth.value(), "delay": self.delay.value()}
-        self.task = Task(mode, url, opts)
+        destination = Path(self.destination_edit.text()).expanduser()
+        if not destination.is_absolute():
+            QMessageBox.warning(self, "Destination", "Choose an absolute archive folder.")
+            return
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(self, "Destination", f"Cannot create the selected folder: {exc}")
+            return
+        self.destination = destination
+        self.lib = Archiver(destination, lambda *args: None, threading.Event(), threading.Event()).library
+        opts = {"max_pages": 1 if one_page else self.pages.value(), "max_depth": self.depth.value(), "delay": self.delay.value()}
+        self.task = Task(mode, url, destination, opts)
         self.task.status.connect(self.status.setText)
         self.task.progress.connect(self.on_progress)
         self.task.page.connect(lambda *_: self.refresh())
         self.task.start()
+
+    def destination_for_url(self, value):
+        host = urlparse(value).netloc.lower() or "__default__"
+        saved = self.settings.value("destinations/" + host, "")
+        return Path(saved).expanduser() if saved else default_destination(value)
+
+    def suggest_site_folder(self, value):
+        # Each host remembers its own user-selected folder across restarts.
+        path = self.destination_for_url(value)
+        self.destination = path
+        self.destination_edit.setText(str(path))
+        self.lib = Archiver(path, lambda *args: None, threading.Event(), threading.Event()).library
+        self.refresh()
+
+    def choose_destination(self):
+        current = self.destination_edit.text() or str(home())
+        selected = QFileDialog.getExistingDirectory(self, "Select archive destination", current)
+        if selected:
+            self.destination = Path(selected)
+            self.destination_edit.setText(selected)
+            host = urlparse(self.url.text().strip()).netloc.lower() or "__default__"
+            self.settings.setValue("destinations/" + host, selected)
+            self.settings.sync()
+            self.lib = Archiver(self.destination, lambda *args: None, threading.Event(), threading.Event()).library
+            self.refresh()
 
     def stop_task(self):
         if self.task:
@@ -199,7 +261,7 @@ class Window(QMainWindow):
     def open_page(self, row, col):
         item = self.table.item(row, 0)
         if item:
-            path = home() / "library" / (item.data(32) or "")
+            path = self.destination / "library" / (item.data(32) or "")
             if path.is_file():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
@@ -242,7 +304,7 @@ class Window(QMainWindow):
             QMessageBox.information(self, "Integrity check", "All indexed page and asset files passed SHA-256 verification.")
 
     def export(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export ZIP", "OfflineArchiver.zip", "ZIP (*.zip)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export ZIP", str(self.destination / "OfflineArchiver.zip"), "ZIP (*.zip)")
         if path:
             try:
                 self.lib.export_zip(Path(path))
