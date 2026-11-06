@@ -338,6 +338,7 @@ class Archiver:
                         self.library.set_queue_state(url, "saved")
                         self.emit("page", saved, soup.title.get_text(" ", strip=True) if soup.title else final_url, final_url)
                         self.emit("status", f"Saved {done} pages in this run; {len(queue)} queued.")
+                        break
                     except Exception as exc:
                         error_text = str(exc)
                         lower_error = error_text.lower()
