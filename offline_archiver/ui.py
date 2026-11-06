@@ -57,11 +57,13 @@ class EmbeddedBrowser(QWidget):
         actions = QHBoxLayout()
         self.start_download = QPushButton("Start / Resume this page")
         self.pause_download = QPushButton("Pause")
+        self.resume_download = QPushButton("Resume")
         self.stop_download = QPushButton("Stop safely")
         self.browser_progress = QProgressBar()
         self.browser_status = QLabel("Sign in here, then start archiving without leaving this tab.")
         actions.addWidget(self.start_download)
         actions.addWidget(self.pause_download)
+        actions.addWidget(self.resume_download)
         actions.addWidget(self.stop_download)
         actions.addWidget(self.browser_progress, 1)
         layout.addLayout(actions)
@@ -211,6 +213,7 @@ class Window(QMainWindow):
         self.tabs.addTab(self.browser, "Browser & Sign-in")
         self.browser.start_download.clicked.connect(self.start_from_browser)
         self.browser.pause_download.clicked.connect(self.pause_task)
+        self.browser.resume_download.clicked.connect(self.resume_task)
         self.browser.stop_download.clicked.connect(self.stop_task)
         self.tabs.addTab(self._dashboard_tab(), "Dashboard")
         self.tabs.addTab(self._queue_tab(), "Queue & Six-list ledger")
@@ -261,19 +264,26 @@ class Window(QMainWindow):
         form.addWidget(self.storage_btn,2,5)
         self.pages = QSpinBox(); self.pages.setRange(1,10000); self.pages.setValue(500)
         self.depth = QSpinBox(); self.depth.setRange(0,20); self.depth.setValue(0)
-        self.delay = QDoubleSpinBox(); self.delay.setRange(3,120); self.delay.setValue(5.0); self.delay.setSuffix(" sec")
+        self.delay = QDoubleSpinBox(); self.delay.setRange(0.2,120); self.delay.setValue(5.0); self.delay.setSuffix(" sec")
+        self.external_domains = QCheckBox("Follow links to other domains")
+        self.external_domains.setToolTip("Off: remain on the starting site's domain and subdomains. On: follow linked domains too; use only where you are authorized.")
         form.addWidget(QLabel("Start URL"),0,0); form.addWidget(self.url,0,1,1,5)
+        form.addWidget(self.external_domains,3,1,1,3)
         form.addWidget(QLabel("Max pages / run"),1,0); form.addWidget(self.pages,1,1)
         form.addWidget(QLabel("Link depth (0 = unlimited)"),1,2); form.addWidget(self.depth,1,3)
         form.addWidget(QLabel("Delay between pages"),1,4); form.addWidget(self.delay,1,5)
         layout.addLayout(form)
         controls=QHBoxLayout()
-        self.start_btn=QPushButton("Start / Resume download"); self.pause_btn=QPushButton("Pause after current page")
+        self.start_btn=QPushButton("Start / Resume download")
+        self.pause_btn=QPushButton("Pause after current page")
+        self.resume_btn=QPushButton("Resume")
         self.stop_btn=QPushButton("Stop safely"); self.finish_btn=QPushButton("Finish & refresh index")
-        for b in (self.start_btn,self.pause_btn,self.stop_btn,self.finish_btn): controls.addWidget(b)
+        for b in (self.start_btn,self.pause_btn,self.resume_btn,self.stop_btn,self.finish_btn): controls.addWidget(b)
         layout.addLayout(controls)
         self.progress=QProgressBar(); layout.addWidget(self.progress)
         self.start_btn.clicked.connect(self.start_crawl); self.pause_btn.clicked.connect(self.pause_task)
+        self.resume_btn.clicked.connect(self.resume_task)
+        self.resume_btn.setEnabled(False); self.browser.resume_download.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_task); self.finish_btn.clicked.connect(self.refresh_all)
         self.pages.valueChanged.connect(lambda value: self.update_live_option("max_pages", value))
         self.depth.valueChanged.connect(lambda value: self.update_live_option("max_depth", value))
@@ -461,8 +471,7 @@ class Window(QMainWindow):
                 "No cookies for this site have been captured from the embedded browser. Continue only if the page is public or your session does not use cookies.")
             if answer != QMessageBox.Yes: self.tabs.setCurrentIndex(0); return
         opts={"max_pages":self.pages.value(),"max_depth":self.depth.value(),"delay":self.delay.value(),
-              "cookies":cookies,"cookies_provider":lambda: self.browser.cookie_snapshot_for(host),
-              "include_external":False}
+              "cookies":cookies,"include_external":self.external_domains.isChecked()}
         self.activate_site()
         self.task=Task(self.site_root,url,opts)
         task=self.task
@@ -502,13 +511,28 @@ class Window(QMainWindow):
             self.task.stop(); self.set_status("Stopping safely after current page…")
 
     def pause_task(self):
-        if not self.task or not self.task.isRunning(): return
-        if self.task.pause_event.is_set():
-            self.task.pause_event.clear(); self.pause_btn.setText("Pause after current page")
-            self.browser.pause_download.setText("Pause")
-        else:
-            self.task.pause_event.set(); self.pause_btn.setText("Resume")
-            self.browser.pause_download.setText("Resume")
+        if not self.task or not self.task.isRunning():
+            self.set_status("No active download to pause.")
+            return
+        self.task.pause_event.set()
+        self.pause_btn.setEnabled(False)
+        self.resume_btn.setEnabled(True)
+        self.browser.pause_download.setEnabled(False)
+        self.browser.resume_download.setEnabled(True)
+        self.set_status("Pause requested. The current page will finish before the crawler pauses.")
+
+    def resume_task(self):
+        if self.task and self.task.isRunning():
+            self.task.pause_event.clear()
+            self.pause_btn.setEnabled(True)
+            self.resume_btn.setEnabled(False)
+            self.browser.pause_download.setEnabled(True)
+            self.browser.resume_download.setEnabled(False)
+            self.set_status("Download resumed from the saved queue.")
+            return
+        # A stopped or interrupted worker is resumed by creating a new worker;
+        # Archiver loads pending rows from the persistent queue, not page one.
+        self.start_crawl()
 
     def refresh_all(self):
         counts=self.lib.queue_stats()
