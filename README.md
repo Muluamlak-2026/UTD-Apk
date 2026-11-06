@@ -1,38 +1,48 @@
 # Offline Archiver for Windows
 
-A Windows desktop snapshot tool for web pages that the signed-in user is authorized to access and retain. It uses a visible Microsoft Edge session with a persistent local profile, a bounded same-host crawler, SQLite indexing, local asset storage, full-text search, retryable crawl queue, integrity verification, and portable ZIP export.
+> **Canonical repository:** [Muluamlak-2026/UTD-Apk](https://github.com/Muluamlak-2026/UTD-Apk). All future source changes, Windows builds, installers, and release artifacts for this application must be made from `UTD-Apk`. `Site-Archive-Browser` is not the active build repository.
 
-## Current capabilities
+A Windows desktop offline website archiver with a persistent **embedded Chromium browser tab**, a manually controlled sign-in workflow, a conservative crawl worker, a six-state queue ledger, searchable local archive, integrity checks, diagnostics and portable export.
 
-Build/test status is published in the repository's Actions tab. Use only an artifact from the latest successful run for the current main commit.
-- Visible Edge sign-in session; sign in manually and complete MFA/CAPTCHA yourself.
-- Persistent local browser profile so normal sessions may remain available between runs.
-- Recursive same-host page discovery with configurable page cap, depth, and request delay.
-- Captures page DOM snapshots and eligible GET-loaded images, fonts, audio/video, CSS, PDF and WASM resources (individual resource cap 30 MB).
-- Scrolls pages to trigger common lazy-loaded content; captures src, srcset, poster and link references when the resource was observed.
-- SQLite page index and FTS5 content search.
-- Persistent crawl queue across restarts, pause/resume, stop, mark queued URLs as passed, restore passed items, retry failed items.
-- Portable ZIP with an index page, local HTML snapshots and captured assets.
-- SHA-256 integrity check for indexed page and asset files.
+## Main application tabs
 
-## Important limitations
-This is a testable first release, not a certified full-site mirroring engine. A snapshot cannot guarantee offline operation of interactive applications, JavaScript APIs, POST-driven content, authenticated API calls, service workers, cross-origin embedded frames, streaming media, or content that only appears after a specific user interaction. CSS files are saved, but complex CSS-relative asset dependencies may need further rewriting. Infinite-scroll pages are bounded by the scroll limit. The current UI's pass action applies to queued URLs; the page table lists saved pages, not every pending queue item. Site-specific validation is required.
+- **Browser & Sign-in:** embedded Chromium browser with its own persistent profile, address bar, back/forward/reload and manual sign-in. Cookies observed in this browser profile are synchronized to the capture worker for the selected site. No credentials are submitted by automation.
+- **Dashboard:** downloaded, pending, failed, passed, redownloaded, incomplete/JS, attempted and asset counters; page/depth/request-delay settings; start/resume, pause and safe stop.
+- **Queue & Six-list ledger:** downloaded pages remain in the library; pending, failed, passed and running URLs remain visible in the queue ledger. Add URLs, pass/skip with a reason, restore passed URLs, retry failures and force-redownload a selected URL.
+- **Search & Offline library:** FTS5 full-text search, saved-page listing and opening local HTML snapshots in the built-in Offline Reader.
+- **Diagnostics & Export:** SHA-256 integrity verification, diagnostic report, archive folder access and portable ZIP export. Page rows record a completeness classification and notes; incomplete captures can be re-queued.
 
-## Safety and permitted use
-- Archive only content you are authorized to access and retain, and follow the website's terms and applicable law.
-- The application does not bypass paywalls, DRM, MFA, CAPTCHA, authentication, or other access controls.
-- Authentication is manual in the visible browser. Do not share the browser profile or archive ZIP; they may contain session state and sensitive medical content.
-- Do not use this tool to redistribute copyrighted subscription content. Use it only where your subscription terms and applicable law permit local retention.
+## Browser and session behavior
+
+The embedded browser uses a separate persistent profile under `%LOCALAPPDATA%\\OfflineArchiver\\embedded-browser`. It does not attach to or control your ordinary Edge profile. The capture worker receives a snapshot of matching cookies from the embedded browser; browser localStorage, sessionStorage, service-worker state and every site-specific token are not guaranteed to transfer. Sites relying on those mechanisms may require additional integration and may not archive completely.
+
+The app does not add Chromium's `--no-sandbox` flag or disable the browser sandbox. It does not need to open a separate interactive Edge window for manual login. The crawl worker uses Playwright in a separate browser context so its page capture can be isolated from the visible browser tab; it receives the captured site cookies. The visible embedded browser remains the place to sign in and inspect pages.
+
+## Account and request safety
+
+- Only archive content you are authorized to access and retain; follow provider terms and applicable law.
+- Login is manual. The app does not automate passwords, CAPTCHA, MFA or paywall bypass.
+- Requests are sequential, with a default five-second delay and a bounded page/depth run.
+- HTTP 401, 403 and 429 responses stop the current run and are not automatically retried. Review your session and contact the provider for account-access issues; do not repeatedly test a suspended credential.
+- Never share the browser profile or archive ZIP; they may contain session cookies and sensitive content.
+
+## Capture coverage and known limits
+
+The crawler saves rendered HTML snapshots and observed GET-loaded image, font, audio/video, CSS, JavaScript, PDF and WASM resources within configured size limits. It discovers same-site links recursively (including subdomains of the seed host); link depth `0` means unlimited, while the per-run page cap remains active. It triggers bounded lazy loading and preserves current form field values and canvas-rendered charts as a snapshot. Pages are classified as complete or partial with notes for detected iframes, POST forms, fetch/XHR endpoints, external scripts and uncaptured remote assets. A saved canvas is a static image, not a live calculator. Client-side calculators may work if all dependencies are local, but server/API-backed calculators, cross-origin frames, service workers, streaming media, dynamic state and interactions are not guaranteed offline. A page being saved does not mean every control will work offline.
+
+The completeness classifier is heuristic: it identifies common signs of missing dependencies but cannot prove that every control works offline. The incomplete-page retry action re-queues pages marked partial/incomplete. Do not treat this as certification of calculator functionality.
 
 ## Install and test
-1. Download the single compact Windows x64 installer (`OfflineArchiver-Setup-x64.exe`) from the GitHub Actions artifact named `OfflineArchiver-Windows-x64`. The build no longer uploads a second duplicate portable package.
-2. Install and launch. Microsoft Edge must be installed on Windows. It is deliberately not bundled: Playwright controls the Edge already installed on the PC, avoiding a second browser runtime in the installer.
-3. Enter a site URL and select **Open sign-in browser**. Complete sign-in manually, then stop the browser task.
-4. Enter an authorized topic URL and select **Start / Resume**.
-5. Test pause/resume, stop, retry failed, restore passed, search, double-click offline page opening, integrity verification and portable ZIP export.
-6. Extract the ZIP and open `index.html` while offline. Verify the pages and media you need.
+
+1. Download the latest successful Windows x64 installer from the GitHub Actions artifact `OfflineArchiver-Windows-x64`.
+2. Install and launch on Windows 10/11.
+3. Open **Browser & Sign-in**, navigate to the authorized site and sign in manually.
+4. Return to **Dashboard**, enter the starting URL and use conservative settings for initial tests (one page at a time).
+5. Inspect **Queue & Six-list ledger**, then verify pages in **Search & Offline library**.
+6. Use **Diagnostics & Export** to verify the archive and create a portable ZIP.
 
 ## Build from source
+
 - Windows 10/11, Python 3.11+
 - `py -3.11 -m venv .venv`
 - `.venv\\Scripts\\activate`
@@ -41,10 +51,8 @@ This is a testable first release, not a certified full-site mirroring engine. A 
 - `python -m playwright install msedge`
 - `python -m offline_archiver`
 
-GitHub Actions compiles, runs tests, packages the application and creates an Inno Setup installer on pushes to main and version tags. A successful CI build confirms compilation, automated tests and packaging; it does not replace real-world site testing.
-
-## Package size strategy
-The desktop UI uses only Qt Essentials (QtCore, QtGui and QtWidgets). Qt WebEngine, Qt PDF, Qt 3D, Qt Multimedia, Qt Charts, QML and Quick modules are excluded because the application does not use them. The installer is the only uploaded artifact; a second ZIP containing the same application is not uploaded. Microsoft Edge is an existing Windows dependency and is not duplicated inside the package. These changes reduce packaging overhead without removing the crawler, browser automation, local database, asset capture, search, queue controls, integrity checks or export features.
+The build packages the Qt WebEngine runtime for the embedded browser. This increases installer size compared with a QtWidgets-only build, but is required for the in-app Chromium tab. Do not remove QtWebEngine modules as a size optimization.
 
 ## Data location
-Default data folder: `%LOCALAPPDATA%\\OfflineArchiver`. The browser profile, cookies, database and archive content are stored there. Keep sufficient disk space and back up the library folder before major changes.
+
+Default data folder: `%LOCALAPPDATA%\\OfflineArchiver`. It contains the embedded browser profile, library database, page snapshots and assets. Back it up before major updates. Keep sufficient disk space; archive content size is independent of installer size.

@@ -1,7 +1,7 @@
-name: Windows build
+name: UTD-Apk · Windows desktop application
 on:
   push:
-    branches: [main]
+    branches: [main, feature/embedded-browser-full-dashboard]
     tags: ["v*"]
   pull_request:
     branches: [main]
@@ -31,7 +31,7 @@ jobs:
       - name: Package compact Windows installer
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --windowed --onedir --name OfflineArchiver --collect-all playwright --collect-all bs4 --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets --exclude-module PySide6.QtPdf --exclude-module PySide6.QtPdfWidgets --exclude-module PySide6.Qt3DCore --exclude-module PySide6.Qt3DRender --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtCharts --exclude-module PySide6.QtDataVisualization --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick launcher.py
+          pyinstaller --noconfirm --clean --windowed --onedir --name OfflineArchiver --collect-all playwright --collect-all bs4 --collect-all PySide6.QtWebEngineCore --collect-all PySide6.QtWebEngineWidgets --exclude-module PySide6.QtPdf --exclude-module PySide6.QtPdfWidgets --exclude-module PySide6.Qt3DCore --exclude-module PySide6.Qt3DRender --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtCharts --exclude-module PySide6.QtDataVisualization --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick launcher.py
           if (!(Test-Path "dist/OfflineArchiver/OfflineArchiver.exe")) { throw "PyInstaller output missing" }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\OfflineArchiver.iss
           if (!(Test-Path "dist/OfflineArchiver-Setup-x64.exe")) { throw "Installer output missing" }

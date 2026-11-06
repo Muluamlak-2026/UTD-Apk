@@ -28,7 +28,7 @@ def test_save_search_update_and_export(tmp_path: Path):
     assert out.exists() and out.stat().st_size > 0
     with zipfile.ZipFile(out) as archive:
         assert "index.html" in archive.namelist()
-        assert "pages/00000001.html" in archive.namelist()
+        assert "pages/example.org/topic-00000001.html" in archive.namelist()
 
 
 def test_persistent_queue_pass_and_retry(tmp_path: Path):
@@ -69,3 +69,74 @@ def test_running_queue_items_recover_after_restart(tmp_path: Path):
     pending = reopened.pending_queue()
     assert len(pending) == 1
     assert pending[0]["url"] == "https://example.org/interrupted"
+
+
+
+def test_queue_ledger_add_pass_reason_and_force_redownload(tmp_path: Path):
+    lib = Library(tmp_path / "lib")
+    url = "https://example.org/topic"
+    assert lib.add_url(url, 0) is True
+    assert lib.add_url(url, 0) is False
+    lib.pass_url(url)
+    lib.set_queue_state(url, "passed", "User skipped this topic")
+    row = lib.queue_items("passed")[0]
+    assert row["url"] == url
+    assert row["error"] == "User skipped this topic"
+    assert lib.restore_passed() == 1
+    assert lib.pending_queue()[0]["url"] == url
+    lib.force_redownload(url, 2)
+    row = lib.queue_items("pending")[0]
+    assert row["depth"] == 2
+
+
+
+def test_page_completeness_and_retry_incomplete(tmp_path: Path):
+    lib = Library(tmp_path / "lib")
+    url = "https://example.org/calculator"
+    lib.enqueue(url, 2)
+    lib.save_page(
+        url, url, "Calculator", "<html><body>calculator</body></html>",
+        "calculator", 200, 2, [], completeness="partial",
+        completeness_notes="Fetch/XHR API detected"
+    )
+    row = lib.list_pages()[0]
+    assert row["completeness"] == "partial"
+    assert "API detected" in row["completeness_notes"]
+    assert lib.queue_stats()["incomplete"] == 1
+    assert lib.retry_incomplete() == 1
+    assert lib.pending_queue()[0]["url"] == url
+
+
+def test_portable_export_rewrites_nested_page_and_asset_links(tmp_path: Path):
+    lib = Library(tmp_path / "lib")
+    home = "https://example.org/specialty/topic/"
+    child = "https://example.org/specialty/topic/subtopic"
+    image = "https://example.org/media/diagram.png"
+    css = "https://example.org/styles/topic.css"
+    image_ref = lib.save_asset(image, b"image-bytes", "image/png")
+    css_ref = lib.save_asset(css, b".x{background:url('../media/diagram.png')}", "text/css")
+    lib.save_page(
+        home, home, "Topic",
+        f'<html><head><link rel="stylesheet" href="{css}"></head><body><a href="{child}">Child</a><img src="{image}"></body></html>',
+        "Topic", 200, 0, [child]
+    )
+    lib.save_page(
+        child, child, "Subtopic",
+        '<html><body>Subtopic</body></html>', "Subtopic", 200, 1, []
+    )
+    out = tmp_path / "portable.zip"
+    lib.export_zip(out)
+    with zipfile.ZipFile(out) as archive:
+        names = set(archive.namelist())
+        parent_path = "pages/example.org/specialty/topic/index-00000001.html"
+        child_path = "pages/example.org/specialty/topic/subtopic-00000002.html"
+        assert parent_path in names
+        assert child_path in names
+        html = archive.read(parent_path).decode("utf-8")
+        assert "subtopic-00000002.html" in html
+        assert "../" in html
+        css_path = next(n for n in names if n.startswith("assets/") and n.endswith(".css"))
+        css_text = archive.read(css_path).decode("utf-8")
+        assert "url('" in css_text
+        assert "diagram.png" not in css_text or "../" in css_text
+        assert "index.html" in names
