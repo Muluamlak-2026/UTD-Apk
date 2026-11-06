@@ -109,11 +109,15 @@ class Archiver:
                         current_cookies = cookies_provider()
                     except Exception:
                         pass
-                if current_cookies:
-                    try:
+                try:
+                    # The worker is isolated to this site. Replace its cookie jar with
+                    # the latest embedded-browser snapshot so removed/expired cookies
+                    # are not silently retained by a long-running capture context.
+                    await context.clear_cookies()
+                    if current_cookies:
                         await context.add_cookies(current_cookies)
-                    except Exception as exc:
-                        self.emit("status", "Some embedded-browser session cookies could not be synchronized: " + str(exc))
+                except Exception as exc:
+                    self.emit("status", "Some embedded-browser session cookies could not be synchronized: " + str(exc))
                 url, depth = queue.popleft()
                 self.library.set_queue_state(url, "running")
                 done += 1
@@ -178,6 +182,40 @@ class Archiver:
                             asset_capture_errors += 1
                     for asset_url, (body, mime) in asset_bodies.items():
                         resources[asset_url] = self.library.save_asset(asset_url, body, mime)
+
+                    # Crawler 2.2-style dependency localization: CSS is rewritten
+                    # after the complete response set is known, so captured fonts,
+                    # background images and imported stylesheets resolve offline.
+                    css_url_pattern = re.compile(r"""url\\(\\s*(?P<q>['"]?)(?P<url>[^)'"]+)(?P=q)\\s*\\)""", re.I)
+                    import_pattern = re.compile(r"""@import\\s+(['"])(.*?)\\1""", re.I)
+                    for asset_url, (body, mime) in asset_bodies.items():
+                        if mime.split(";", 1)[0].lower() != "text/css":
+                            continue
+                        try:
+                            css_text = body.decode("utf-8", "replace")
+
+                            def rewrite_css_url(match):
+                                raw = match.group("url").strip()
+                                if raw.startswith(("data:", "blob:", "#")):
+                                    return match.group(0)
+                                target = canonical(urljoin(asset_url, raw))
+                                local = resources.get(target)
+                                return f'url("{Path(local).name}")' if local else match.group(0)
+
+                            def rewrite_css_import(match):
+                                target = canonical(urljoin(asset_url, match.group(2).strip()))
+                                local = resources.get(target)
+                                return f'@import "{Path(local).name}"' if local else match.group(0)
+
+                            css_text = css_url_pattern.sub(rewrite_css_url, css_text)
+                            css_text = import_pattern.sub(rewrite_css_import, css_text)
+                            resources[asset_url] = self.library.save_asset(
+                                asset_url, css_text.encode("utf-8"), mime
+                            )
+                        except Exception:
+                            # Keep the original CSS asset if a stylesheet cannot be rewritten.
+                            pass
+
                     final_url = canonical(page.url) or url
                     live_state = await page.evaluate("""() => ({
                       fields: [...document.querySelectorAll('input,textarea,select')].map((e,i)=>({i,value:e.value,checked:!!e.checked,type:e.type,tag:e.tagName})),
