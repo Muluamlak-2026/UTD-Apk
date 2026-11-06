@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -122,13 +123,13 @@ class Task(QThread):
             self.page.emit(*args)
 
     def run(self):
+        # Each Qt worker owns one asyncio loop for the complete async Playwright
+        # lifecycle. Do not mix Playwright's sync bridge with Qt worker threads.
         try:
-            self.engine.crawl(self.url, **self.opts)
+            asyncio.run(self.engine.crawl(self.url, **self.opts))
         except Exception as exc:
-            self.status.emit("Error: " + str(exc))
-        finally:
-            if not self.engine.halt_reason:
-                self.status.emit("Task finished.")
+            self.status.emit("Crawler stopped with an error; queued pages were retained: " + repr(exc))
+
 
     def stop(self):
         self.stop_event.set()
