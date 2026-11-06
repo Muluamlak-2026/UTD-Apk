@@ -322,7 +322,7 @@ class Library:
                         raw = match.group(1).strip().strip("\\\"'")
                         target = resolve_asset(row["url"], raw)
                         return "url('" + (relative(page_path, target) if target else raw) + "')"
-                    element["style"] = re.sub(r"url[(]\\s*['"]?(.*?)['"]?\\s*[)]", replace_inline, style, flags=re.I)
+                    element["style"] = re.sub(r"url[(]\\s*[\\x22\\x27]?(.*?)[\\x22\\x27]?\\s*[)]", replace_inline, style, flags=re.I)
                 z.writestr(page_path, str(soup))
 
             # CSS assets can themselves reference fonts and images; rewrite those too.
@@ -342,7 +342,7 @@ class Library:
                             absolute = self._url_key(urljoin(asset["url"], raw))
                             target = asset_paths.get(absolute)
                             return "url('" + (relative(css_path, target) if target else raw) + "')"
-                        css = re.sub(r"url[(]\\s*['"]?(.*?)['"]?\\s*[)]", replace_css, css, flags=re.I)
+                        css = re.sub(r"url[(]\\s*[\\x22\\x27]?(.*?)[\\x22\\x27]?\\s*[)]", replace_css, css, flags=re.I)
                         output = css.encode("utf-8")
                     except Exception:
                         pass
