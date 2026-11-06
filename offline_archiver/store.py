@@ -8,7 +8,9 @@ import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, urldefrag
+import posixpath
+import re
 
 from bs4 import BeautifulSoup
 
@@ -231,46 +233,138 @@ class Library:
                     problems.append(f"Hash mismatch: {row['path']}")
         return problems
 
+    @staticmethod
+    def _url_key(url):
+        if not url:
+            return ""
+        return urldefrag(url.strip())[0]
+
+    @staticmethod
+    def _portable_page_path(url, page_id):
+        parsed = urlparse(url)
+        host = (parsed.hostname or "unknown-host").lower()
+        host = re.sub(r"[^a-z0-9.-]+", "_", host)
+        parts = [p for p in parsed.path.split("/") if p]
+        safe_parts = [re.sub(r"[^A-Za-z0-9._-]+", "_", p)[:80] or "item" for p in parts]
+        if not safe_parts or parsed.path.endswith("/"):
+            safe_parts.append("index")
+        leaf = safe_parts[-1]
+        if "." in leaf:
+            stem, ext = leaf.rsplit(".", 1)
+            safe_parts[-1] = f"{stem[:60]}-{page_id:08d}.{ext[:12]}"
+        else:
+            safe_parts[-1] = f"{leaf[:60]}-{page_id:08d}.html"
+        return "pages/" + host + "/" + "/".join(safe_parts)
+
     def export_zip(self, destination):
+        """Create a portable archive with URL-derived paths and rewritten local dependencies."""
         with self.lock:
             rows = [dict(r) for r in self.db.execute(
-                "SELECT id,url,title,html_path FROM pages ORDER BY title COLLATE NOCASE"
+                "SELECT id,url,requested_url,title,html_path FROM pages ORDER BY title COLLATE NOCASE"
             ).fetchall()]
-            assets = [dict(r) for r in self.db.execute("SELECT url,path FROM assets").fetchall()]
-        local = {r["url"]: Path(r["html_path"]).name for r in rows}
-        asset_local = {r["url"]: r["path"] for r in assets}
+            assets = [dict(r) for r in self.db.execute("SELECT url,path,mime FROM assets").fetchall()]
+
+        page_paths = {}
+        for row in rows:
+            target = self._portable_page_path(row["url"], row["id"])
+            page_paths[self._url_key(row["url"])] = target
+            if row.get("requested_url"):
+                page_paths.setdefault(self._url_key(row["requested_url"]), target)
+        asset_paths = {self._url_key(a["url"]): a["path"] for a in assets}
+        asset_by_url = {self._url_key(a["url"]): a for a in assets}
+
+        def relative(source_path, target_path):
+            return posixpath.relpath(target_path, posixpath.dirname(source_path) or ".")
+
+        def resolve_page(base_url, value):
+            absolute = self._url_key(urljoin(base_url, value))
+            return page_paths.get(absolute)
+
+        def resolve_asset(base_url, value):
+            absolute = self._url_key(urljoin(base_url, value))
+            return asset_paths.get(absolute)
+
         with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            # Rewrite HTML references relative to each exported page's actual directory.
             for row in rows:
                 source = self.root / row["html_path"]
+                page_path = page_paths[self._url_key(row["url"])]
                 soup = BeautifulSoup(source.read_text(encoding="utf-8", errors="replace"), "html.parser")
-                for a in soup.select("a[href]"):
-                    target = a.get("href", "")
-                    if target in local:
-                        a["href"] = local[target]
-                for el in soup.select("[src],link[href],source[src],video[poster]"):
+                for element in soup.select("a[href],area[href]"):
+                    value = element.get("href", "")
+                    target = resolve_page(row["url"], value)
+                    if target:
+                        suffix = ""
+                        if "#" in value:
+                            suffix = "#" + value.split("#", 1)[1]
+                        element["href"] = relative(page_path, target) + suffix
+                for element in soup.select("[src],link[href],source[src],video[poster],audio[src],script[src]"):
                     for attr in ("src", "href", "poster"):
-                        value = el.get(attr)
-                        if value in asset_local:
-                            el[attr] = "../" + asset_local[value]
-                z.writestr(row["html_path"], str(soup))
-            for folder in (self.assets_dir,):
-                for f in folder.rglob("*"):
-                    if f.is_file():
-                        z.write(f, f.relative_to(self.root))
+                        value = element.get(attr)
+                        if value:
+                            target = resolve_asset(row["url"], value)
+                            if target:
+                                element[attr] = relative(page_path, target)
+                    srcset = element.get("srcset")
+                    if srcset:
+                        rewritten = []
+                        for candidate in srcset.split(","):
+                            bits = candidate.strip().split()
+                            if bits:
+                                target = resolve_asset(row["url"], bits[0])
+                                if target:
+                                    bits[0] = relative(page_path, target)
+                                rewritten.append(" ".join(bits))
+                        element["srcset"] = ", ".join(rewritten)
+                for element in soup.select("[style]"):
+                    style = element.get("style", "")
+                    def replace_inline(match):
+                        raw = match.group(2).strip().strip("\\\"'")
+                        target = resolve_asset(row["url"], raw)
+                        return "url('" + (relative(page_path, target) if target else raw) + "')"
+                    element["style"] = re.sub(r"url\\(\\s*(['\\\"]?)(.*?)\\1\\s*\\)", replace_inline, style, flags=re.I)
+                z.writestr(page_path, str(soup))
+
+            # CSS assets can themselves reference fonts and images; rewrite those too.
+            for asset in assets:
+                source = self.root / asset["path"]
+                if not source.is_file():
+                    continue
+                output = source.read_bytes()
+                if (asset.get("mime") or "").split(";", 1)[0].lower() == "text/css":
+                    try:
+                        css = output.decode("utf-8", errors="replace")
+                        css_path = asset["path"]
+                        def replace_css(match):
+                            raw = match.group(2).strip().strip("\\\"'")
+                            if raw.startswith(("data:", "blob:", "#")):
+                                return match.group(0)
+                            absolute = self._url_key(urljoin(asset["url"], raw))
+                            target = asset_paths.get(absolute)
+                            return "url('" + (relative(css_path, target) if target else raw) + "')"
+                        css = re.sub(r"url\\(\\s*(['\\\"]?)(.*?)\\1\\s*\\)", replace_css, css, flags=re.I)
+                        output = css.encode("utf-8")
+                    except Exception:
+                        pass
+                z.writestr(asset["path"], output)
+
             links = []
             for row in rows:
+                target = page_paths[self._url_key(row["url"])]
                 label = (row["title"] or row["url"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                links.append(f'<li><a href="pages/{local[row["url"]]}">{label}</a><small> — {row["url"]}</small></li>')
+                links.append(f'<li><a href="{target}">{label}</a><small> — {row["url"]}</small></li>')
             index = (
-                "<!doctype html><html><head><meta charset='utf-8'><title>Offline Archiver Library</title>"
-                "<style>body{font:16px Segoe UI,Arial;max-width:1000px;margin:40px auto;padding:0 20px;color:#172b4d}"
-                "li{margin:12px 0}small{color:#667085}</style></head><body><h1>Offline Archiver Library</h1>"
-                "<p>Portable snapshot. Dynamic server features may not work offline.</p><ol>"
-                + "".join(links) + "</ol></body></html>"
+                "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>Offline Archiver Library</title><style>body{font:16px Segoe UI,Arial;max-width:1100px;margin:40px auto;padding:0 20px;color:#172b4d}"
+                "li{margin:12px 0}small{color:#667085;display:block}input{width:100%;padding:12px;box-sizing:border-box}</style></head><body>"
+                "<h1>Offline Archiver Library</h1><p>Portable snapshot. Server-dependent functions may not work offline.</p>"
+                "<input id='q' type='search' placeholder='Filter saved pages by title or URL'><ol id='pages'>"
+                + "".join(links) + "</ol><script>const q=document.getElementById('q');q.addEventListener('input',()=>{const v=q.value.toLowerCase();"
+                "document.querySelectorAll('#pages li').forEach(x=>x.hidden=!x.textContent.toLowerCase().includes(v));});</script></body></html>"
             )
             z.writestr("index.html", index)
             z.writestr("manifest.json", json.dumps({
-                "format": "OfflineArchiverPortable", "version": 2, "generated": self.now(),
+                "format": "OfflineArchiverPortable", "version": 3, "generated": self.now(),
                 "pages": len(rows), "assets": len(assets)
             }, indent=2))
 
