@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 import time
@@ -8,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse, urldefrag
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 from .store import Library
 
@@ -43,28 +44,28 @@ class Archiver:
         while self.pause_event.is_set() and not self.stop_event.is_set():
             time.sleep(.2)
 
-    def _launch(self, p):
-        return p.chromium.launch_persistent_context(
+    async def _launch(self, p):
+        return await p.chromium.launch_persistent_context(
             str(self.profile_dir), channel="msedge", headless=True, accept_downloads=True,
             viewport={"width": 1440, "height": 900}, service_workers="allow",
             args=["--disable-features=msEdgeSidebarV2"],
         )
 
-    def open_login(self, url: str):
+    async def open_login(self, url: str):
         url = canonical(url)
         if not url:
             raise ValueError("Enter a valid HTTP or HTTPS URL.")
-        with sync_playwright() as p:
-            context = self._launch(p)
+        async with async_playwright() as p:
+            context = await self._launch(p)
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             self.emit("status", "Sign in manually in Edge. MFA/CAPTCHA remain interactive. Stop when finished.")
             while not self.stop_event.wait(.3):
                 pass
-            context.close()
+            await context.close()
         self.emit("status", "Browser profile saved locally.")
 
-    def crawl(self, start_url: str, max_pages: int = 100, max_depth: int = 3,
+    async def crawl(self, start_url: str, max_pages: int = 100, max_depth: int = 3,
               delay: float = 5.0, include_external: bool = False, cookies=None):
         start_url = canonical(start_url)
         if not start_url:
@@ -75,11 +76,11 @@ class Archiver:
         # Continue from the persisted queue after a normal stop or application restart.
         queue = deque((r["url"], r["depth"]) for r in self.library.pending_queue())
         done = 0
-        with sync_playwright() as p:
-            context = self._launch(p)
+        async with async_playwright() as p:
+            context = await self._launch(p)
             if cookies:
                 try:
-                    context.add_cookies(cookies)
+                    await context.add_cookies(cookies)
                     self.emit("status", "Imported " + str(len(cookies)) + " session cookies from the embedded browser profile.")
                 except Exception as exc:
                     self.emit("status", "Some browser cookies could not be synchronized: " + str(exc))
@@ -100,7 +101,7 @@ class Archiver:
                     observed_responses.append(response)
                 page.on("response", on_response)
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     status = response.status if response else 0
                     if status in (401, 403, 429):
                         if status == 429:
@@ -115,11 +116,11 @@ class Archiver:
                         self.stop_event.set()
                         break
                     try:
-                        page.wait_for_load_state("networkidle", timeout=12000)
+                        await page.wait_for_load_state("networkidle", timeout=12000)
                     except PlaywrightTimeoutError:
                         pass
                     # Trigger lazy-loaded images and infinite-scroll content, but bound the scroll work.
-                    page.evaluate("""async () => {
+                    await page.evaluate("""async () => {
                       const step = Math.max(500, Math.floor(innerHeight * .75));
                       let previous = -1;
                       for (let i=0; i<80; i++) {
@@ -134,7 +135,7 @@ class Archiver:
                       }
                       window.scrollTo(0,0);
                     }""")
-                    page.wait_for_timeout(500)
+                    await page.wait_for_timeout(500)
                     asset_bodies = {}
                     asset_capture_errors = 0
                     for asset_response in observed_responses:
@@ -145,7 +146,7 @@ class Archiver:
                             mime = asset_response.headers.get("content-type", "").split(";")[0].lower()
                             if not (mime.startswith(ASSET_TYPES) or mime in ASSET_MIMES):
                                 continue
-                            body = asset_response.body()
+                            body = await asset_response.body()
                             if body and len(body) <= MAX_RESOURCE_BYTES:
                                 asset_bodies[canonical(asset_response.url)] = (body, mime)
                         except Exception:
@@ -154,7 +155,7 @@ class Archiver:
                     for asset_url, (body, mime) in asset_bodies.items():
                         resources[asset_url] = self.library.save_asset(asset_url, body, mime)
                     final_url = canonical(page.url) or url
-                    live_state = page.evaluate("""() => ({
+                    live_state = await page.evaluate("""() => ({
                       fields: [...document.querySelectorAll('input,textarea,select')].map((e,i)=>({i,value:e.value,checked:!!e.checked,type:e.type,tag:e.tagName})),
                       canvases: [...document.querySelectorAll('canvas')].map((c,i)=>({i,data:(()=>{try{return c.toDataURL('image/png')}catch(e){return null}})()})),
                       frames: [...document.querySelectorAll('iframe')].map(f=>f.src || ''),
@@ -162,7 +163,7 @@ class Archiver:
                       forms: [...document.forms].map(f=>({action:f.action,method:f.method})),
                       api: performance.getEntriesByType('resource').filter(e=>e.initiatorType==='fetch'||e.initiatorType==='xmlhttprequest').map(e=>e.name)
                     })""")
-                    html = page.content()
+                    html = await page.content()
                     soup = BeautifulSoup(html, "html.parser")
                     fields = soup.select("input,textarea,select")
                     for state in live_state.get("fields", []):
@@ -259,7 +260,7 @@ class Archiver:
                     interval = min(.2, remaining)
                     self.stop_event.wait(interval)
                     remaining -= interval
-            context.close()
+            await context.close()
         if self.halt_reason:
             self.emit("status", self.halt_reason + f" Processed {done} pages; {len(self.library.pending_queue())} pending pages remain available to resume.")
         elif self.stop_event.is_set():
