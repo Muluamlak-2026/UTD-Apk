@@ -18,6 +18,36 @@ MAX_RESOURCE_BYTES = 30 * 1024 * 1024
 ASSET_TYPES = ("image/", "font/", "audio/", "video/")
 ASSET_MIMES = {"text/css", "text/javascript", "application/javascript", "application/x-javascript", "application/pdf", "application/wasm"}
 
+async def accept_cookie_consent(page):
+    """Honor the user's explicit request to accept all cookies during capture.
+
+    Only click clearly-labelled accept-all controls; never click reject, manage,
+    or accept-selected controls. The browser context retains the resulting choice
+    for subsequent pages in the same crawl.
+    """
+    script = r"""() => {
+      const visible = el => {
+        const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+      };
+      const accept = /^(accept all cookies|accept all|allow all cookies|allow all)$/i;
+      const controls = [...document.querySelectorAll('button,[role="button"],input[type="button"],input[type="submit"]')];
+      const target = controls.find(el => visible(el) && accept.test((el.innerText || el.value || el.getAttribute('aria-label') || '').trim()));
+      if (!target) return false;
+      target.click();
+      return true;
+    }"""
+    for _ in range(6):
+        try:
+            if await page.evaluate(script):
+                await page.wait_for_timeout(350)
+                return True
+        except Exception:
+            return False
+        await page.wait_for_timeout(400)
+    return False
+
+
 
 def canonical(url: str) -> str:
     url, _ = urldefrag(url.strip())
@@ -122,6 +152,9 @@ class Archiver:
                 page.on("response", on_response)
                 try:
                     response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    # User-requested consent handling: click only an explicit
+                    # "Accept All" control before the snapshot is captured.
+                    await accept_cookie_consent(page)
                     status = response.status if response else 0
                     if status in (401, 403, 429):
                         if status == 429:
@@ -139,6 +172,8 @@ class Archiver:
                         await page.wait_for_load_state("networkidle", timeout=12000)
                     except PlaywrightTimeoutError:
                         pass
+                    # Some consent managers render after the initial DOM/network settle.
+                    await accept_cookie_consent(page)
                     # Trigger lazy-loaded images and infinite-scroll content, but bound the scroll work.
                     await page.evaluate("""async () => {
                       const step = Math.max(500, Math.floor(innerHeight * .75));
