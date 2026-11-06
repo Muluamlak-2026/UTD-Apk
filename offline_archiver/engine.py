@@ -186,8 +186,8 @@ class Archiver:
                     # Crawler 2.2-style dependency localization: CSS is rewritten
                     # after the complete response set is known, so captured fonts,
                     # background images and imported stylesheets resolve offline.
-                    css_url_pattern = re.compile(r"""url\\(\\s*(?P<q>['"]?)(?P<url>[^)'"]+)(?P=q)\\s*\\)""", re.I)
-                    import_pattern = re.compile(r"""@import\\s+(['"])(.*?)\\1""", re.I)
+                    css_url_pattern = re.compile(r"""url\(\s*(?P<q>['"]?)(?P<url>[^)'"]+)(?P=q)\s*\)""", re.I)
+                    import_pattern = re.compile(r"""@import\s+(['"])(.*?)\1""", re.I)
                     for asset_url, (body, mime) in asset_bodies.items():
                         if mime.split(";", 1)[0].lower() != "text/css":
                             continue
