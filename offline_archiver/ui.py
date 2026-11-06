@@ -507,7 +507,8 @@ class Window(QMainWindow):
                 "No cookies for this site have been captured from the embedded browser. Continue only if the page is public or your session does not use cookies.")
             if answer != QMessageBox.Yes: self.tabs.setCurrentIndex(0); return
         opts={"max_pages":self.pages.value(),"max_depth":self.depth.value(),"delay":self.delay.value(),
-              "cookies":cookies,"include_external":self.external_domains.isChecked()}
+              "cookies":cookies,"include_external":self.external_domains.isChecked(),
+              "cookies_provider":lambda: self.browser.cookie_snapshot_for(host)}
         self.activate_site()
         self.task=Task(self.site_root,url,opts)
         task=self.task
