@@ -392,7 +392,7 @@ class Window(QMainWindow):
         script = r"""
         (() => {
           const norm = e => ((e.innerText || e.textContent || '') + ' ' +
-            (e.getAttribute('aria-label') || '')).replace(/\\s+/g, ' ').trim().toLowerCase();
+            (e.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim().toLowerCase();
           const candidates = [...document.querySelectorAll(
             '[role="dialog"],[aria-modal="true"],[id*="cookie" i],[class*="cookie" i],' +
             '[id*="consent" i],[class*="consent" i],#onetrust-consent-sdk'
