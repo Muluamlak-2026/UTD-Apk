@@ -121,20 +121,33 @@ class Archiver:
                 "delay": max(0.2, min(120.0, float(current.get("delay", delay)))),
             }
 
-        manager = await async_playwright().start()
-        p = manager
-        context = await self._launch(p)
-        page = context.pages[0] if context.pages else await context.new_page()
+        async def attach_visible_browser():
+            # Attach Playwright to Qt WebEngine's existing Chromium process over
+            # localhost CDP. This is the same visible page/profile the user signed
+            # into; no headless browser, cloned cookies, or second login is used.
+            connected_manager = await async_playwright().start()
+            try:
+                connected_browser = await connected_manager.chromium.connect_over_cdp(
+                    "http://127.0.0.1:9222", timeout=15000
+                )
+                if not connected_browser.contexts:
+                    raise RuntimeError("Visible browser has no active Chromium context.")
+                connected_context = connected_browser.contexts[0]
+                if not connected_context.pages:
+                    raise RuntimeError("Visible browser has no active page. Open the site in Browser Sign-in first.")
+                connected_page = next(
+                    (candidate for candidate in connected_context.pages
+                     if candidate.url.startswith(("http://", "https://"))),
+                    connected_context.pages[0],
+                )
+                return connected_manager, connected_browser, connected_context, connected_page
+            except Exception:
+                await connected_manager.stop()
+                raise
+
+        manager, browser, context, page = await attach_visible_browser()
         try:
-            # Transfer the manually established embedded-browser session once, before
-            # crawling. Repeated cross-browser cookie synchronization was destabilizing
-            # the Playwright driver on long runs. To refresh authentication, pause/stop,
-            # sign in again in the embedded browser, then resume; the queue is durable.
-            if cookies:
-                try:
-                    await context.add_cookies(cookies)
-                except Exception as exc:
-                    self.emit("status", "Initial session-cookie import failed; public pages may still be saved: " + str(exc))
+            self.emit("status", "Connected to the authenticated visible browser. Capturing in its existing session.")
             while queue and not self.stop_event.is_set():
                 await self._wait_if_paused()
                 if self.stop_event.is_set():
@@ -143,15 +156,6 @@ class Archiver:
                 if done >= settings["max_pages"]:
                     break
                 url, depth = queue.popleft()
-                # Refresh the worker's site cookies from the still-open embedded
-                # browser before each page, so session renewal is not frozen at Start.
-                if cookies_provider:
-                    try:
-                        latest_cookies = cookies_provider()
-                        if latest_cookies:
-                            await context.add_cookies(latest_cookies)
-                    except Exception as cookie_error:
-                        self.emit("status", "Could not refresh embedded-browser cookies: " + str(cookie_error)[:240])
                 done += 1
                 self.emit("progress", done, settings["max_pages"], url)
                 for attempt in range(1, 4):
@@ -379,20 +383,11 @@ class Archiver:
                                 # Recreate both the Playwright manager and browser context.
                                 try:
                                     try:
-                                        await context.close()
-                                    except Exception:
-                                        pass
-                                    try:
                                         await manager.stop()
                                     except Exception:
                                         pass
-                                    manager = await async_playwright().start()
-                                    p = manager
-                                    context = await self._launch(p)
-                                    page = context.pages[0] if context.pages else await context.new_page()
-                                    if cookies:
-                                        await context.add_cookies(cookies)
-                                    self.emit("status", "Browser worker reconnected; resuming the interrupted page.")
+                                    manager, browser, context, page = await attach_visible_browser()
+                                    self.emit("status", "Reattached to the visible browser; resuming the interrupted page.")
                                 except Exception as reconnect_error:
                                     self.library.set_queue_state(
                                         url, "pending",
@@ -422,10 +417,6 @@ class Archiver:
                     interval = min(.2, current_delay - elapsed)
                     self.stop_event.wait(interval)
                     elapsed += interval
-            try:
-                await context.close()
-            except Exception:
-                pass
         finally:
             try:
                 await manager.stop()
