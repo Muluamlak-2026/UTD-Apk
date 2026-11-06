@@ -30,6 +30,7 @@ class EmbeddedBrowser(QWidget):
         super().__init__(parent)
         self.data_dir = data_dir
         self.cookies: dict[str, dict] = {}
+        self._cookies_lock = threading.RLock()
         self.profile = QWebEngineProfile("OfflineArchiver", self)
         storage = data_dir / "embedded-browser"
         storage.mkdir(parents=True, exist_ok=True)
@@ -94,13 +95,27 @@ class EmbeddedBrowser(QWidget):
             expiry = cookie.expirationDate()
             if expiry.isValid():
                 item["expires"] = expiry.toSecsSinceEpoch()
-            key = (name, domain, path)
-            self.cookies[str(key)] = item
+            key = str((name, domain, path))
+            with self._cookies_lock:
+                self.cookies[key] = item
         except Exception:
             pass
 
     def cookie_snapshot(self):
-        return list(self.cookies.values())
+        with self._cookies_lock:
+            return [dict(cookie) for cookie in self.cookies.values()]
+
+    def cookie_snapshot_for(self, host):
+        host = (host or "").lower().split(":", 1)[0]
+        with self._cookies_lock:
+            return [
+                dict(cookie) for cookie in self.cookies.values()
+                if host and (
+                    host == cookie.get("domain", "").lstrip(".").lower()
+                    or host.endswith("." + cookie.get("domain", "").lstrip(".").lower())
+                    or cookie.get("domain", "").lstrip(".").lower().endswith("." + host)
+                )
+            ]
 
 
 class Task(QThread):
@@ -112,7 +127,21 @@ class Task(QThread):
         super().__init__()
         self.data_dir, self.url, self.opts = data_dir, url, opts
         self.stop_event, self.pause_event = threading.Event(), threading.Event()
+        self._options_lock = threading.RLock()
+        self._live_options = {
+            key: opts[key] for key in ("max_pages", "max_depth", "delay") if key in opts
+        }
         self.engine = Archiver(data_dir, self.emit_event, self.stop_event, self.pause_event)
+
+    def options_snapshot(self):
+        with self._options_lock:
+            return dict(self._live_options)
+
+    def update_option(self, name, value):
+        if name not in {"max_pages", "max_depth", "delay"}:
+            return
+        with self._options_lock:
+            self._live_options[name] = value
 
     def emit_event(self, kind, *args):
         if kind == "status":
@@ -126,7 +155,9 @@ class Task(QThread):
         # Each Qt worker owns one asyncio loop for the complete async Playwright
         # lifecycle. Do not mix Playwright's sync bridge with Qt worker threads.
         try:
-            asyncio.run(self.engine.crawl(self.url, **self.opts))
+            kwargs = dict(self.opts)
+            kwargs["options_provider"] = self.options_snapshot
+            asyncio.run(self.engine.crawl(self.url, **kwargs))
         except Exception as exc:
             self.status.emit("Crawler stopped with an error; queued pages were retained: " + repr(exc))
 
@@ -409,17 +440,25 @@ class Window(QMainWindow):
         if not url.startswith(("http://","https://")):
             QMessageBox.warning(self,"URL","Enter a valid HTTP or HTTPS URL."); return
         host=urlparse(url).hostname
-        cookies=[c for c in self.browser.cookie_snapshot() if host and (c.get("domain","").lstrip(".")==host or host.endswith("."+c.get("domain","").lstrip(".")))]
+        cookies=self.browser.cookie_snapshot_for(host)
         if not cookies:
             answer=QMessageBox.question(self,"No matching browser cookies",
                 "No cookies for this site have been captured from the embedded browser. Continue only if the page is public or your session does not use cookies.")
             if answer != QMessageBox.Yes: self.tabs.setCurrentIndex(0); return
         opts={"max_pages":self.pages.value(),"max_depth":self.depth.value(),"delay":self.delay.value(),
-              "cookies":cookies,"include_external":False}
+              "cookies":cookies,"cookies_provider":lambda: self.browser.cookie_snapshot_for(host),
+              "include_external":False}
         self.activate_site()
-        self.task=Task(self.site_root,url,opts); self.task.status.connect(self.set_status)
-        self.task.progress.connect(self.on_progress); self.task.page.connect(self.on_page)
-        self.task.start(); self.set_status("Download started with conservative single-page requests.")
+        self.task=Task(self.site_root,url,opts)
+        task=self.task
+        # These controls remain live during a run. Their values are read by the
+        # crawler between pages and during the inter-page delay; no restart needed.
+        self.pages.valueChanged.connect(lambda value, t=task: t.update_option("max_pages", value))
+        self.depth.valueChanged.connect(lambda value, t=task: t.update_option("max_depth", value))
+        self.delay.valueChanged.connect(lambda value, t=task: t.update_option("delay", value))
+        task.status.connect(self.set_status)
+        task.progress.connect(self.on_progress); task.page.connect(self.on_page)
+        task.start(); self.set_status("Download started with the embedded-browser session.")
         self.browser.browser_status.setText("Archiving this site in the background. Your sign-in tab remains open.")
         self.tabs.setCurrentIndex(0)
 
@@ -451,8 +490,10 @@ class Window(QMainWindow):
         if not self.task or not self.task.isRunning(): return
         if self.task.pause_event.is_set():
             self.task.pause_event.clear(); self.pause_btn.setText("Pause after current page")
+            self.browser.pause_download.setText("Pause")
         else:
             self.task.pause_event.set(); self.pause_btn.setText("Resume")
+            self.browser.pause_download.setText("Resume")
 
     def refresh_all(self):
         counts=self.lib.queue_stats()
