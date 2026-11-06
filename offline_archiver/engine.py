@@ -66,7 +66,8 @@ class Archiver:
         self.emit("status", "Browser profile saved locally.")
 
     async def crawl(self, start_url: str, max_pages: int = 100, max_depth: int = 3,
-              delay: float = 5.0, include_external: bool = False, cookies=None):
+              delay: float = 5.0, include_external: bool = False, cookies=None,
+              options_provider=None, cookies_provider=None):
         start_url = canonical(start_url)
         if not start_url:
             raise ValueError("Enter a valid HTTP or HTTPS URL.")
@@ -76,23 +77,47 @@ class Archiver:
         # Continue from the persisted queue after a normal stop or application restart.
         queue = deque((r["url"], r["depth"]) for r in self.library.pending_queue())
         done = 0
+
+        def live_options():
+            # Read a thread-safe snapshot supplied by the desktop UI. Changes apply
+            # between pages without restarting the persisted crawl queue.
+            try:
+                current = options_provider() if options_provider else {}
+            except Exception:
+                current = {}
+            return {
+                "max_pages": max(1, int(current.get("max_pages", max_pages))),
+                "max_depth": int(current.get("max_depth", max_depth)),
+                "delay": max(0.2, min(120.0, float(current.get("delay", delay)))),
+            }
+
         async with async_playwright() as p:
             context = await self._launch(p)
-            if cookies:
-                try:
-                    await context.add_cookies(cookies)
-                    self.emit("status", "Imported " + str(len(cookies)) + " session cookies from the embedded browser profile.")
-                except Exception as exc:
-                    self.emit("status", "Some browser cookies could not be synchronized: " + str(exc))
             page = context.pages[0] if context.pages else await context.new_page()
-            while queue and done < max_pages and not self.stop_event.is_set():
+            # Refresh the embedded browser's matching-site cookies before each page.
+            # A manual re-authentication can therefore be picked up during a long crawl.
+            current_cookies = cookies
+            while queue and not self.stop_event.is_set():
                 await self._wait_if_paused()
                 if self.stop_event.is_set():
                     break
+                settings = live_options()
+                if done >= settings["max_pages"]:
+                    break
+                if cookies_provider:
+                    try:
+                        current_cookies = cookies_provider()
+                    except Exception:
+                        pass
+                if current_cookies:
+                    try:
+                        await context.add_cookies(current_cookies)
+                    except Exception as exc:
+                        self.emit("status", "Some embedded-browser session cookies could not be synchronized: " + str(exc))
                 url, depth = queue.popleft()
                 self.library.set_queue_state(url, "running")
                 done += 1
-                self.emit("progress", done, max_pages, url)
+                self.emit("progress", done, settings["max_pages"], url)
                 resources = {}
                 observed_responses = []
                 def on_response(response):
@@ -196,7 +221,8 @@ class Archiver:
                         if not include_external and not same_site: continue
                         if excluded.search(parsed.path): continue
                         if parsed.path.lower().endswith((".pdf", ".zip", ".exe", ".dmg")): continue
-                        if (max_depth <= 0 or depth < max_depth) and self.library.enqueue(target, depth + 1):
+                        current_depth = live_options()["max_depth"]
+                        if (current_depth <= 0 or depth < current_depth) and self.library.enqueue(target, depth + 1):
                             queue.append((target, depth + 1))
                         a["href"] = target
                         links.append(target)
@@ -253,12 +279,15 @@ class Archiver:
                     except Exception:
                         pass
                 # Delay is interruptible so Stop and Pause respond promptly.
-                remaining = max(1.0, min(delay, 120))
-                while remaining > 0 and not self.stop_event.is_set():
+                elapsed = 0.0
+                while not self.stop_event.is_set():
                     await self._wait_if_paused()
-                    interval = min(.2, remaining)
+                    current_delay = live_options()["delay"]
+                    if elapsed >= current_delay:
+                        break
+                    interval = min(.2, current_delay - elapsed)
                     self.stop_event.wait(interval)
-                    remaining -= interval
+                    elapsed += interval
             await context.close()
         if self.halt_reason:
             self.emit("status", self.halt_reason + f" Processed {done} pages; {len(self.library.pending_queue())} pending pages remain available to resume.")
