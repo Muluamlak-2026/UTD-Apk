@@ -37,6 +37,7 @@ class Archiver:
         self.pause_event = pause_event
         self.profile_dir = data_dir / "browser-profile"
         self.library = Library(data_dir / "library")
+        self.halt_reason = None
 
     def _wait_if_paused(self):
         while self.pause_event.is_set() and not self.stop_event.is_set():
@@ -102,8 +103,14 @@ class Archiver:
                     response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     status = response.status if response else 0
                     if status in (401, 403, 429):
-                        reason = "HTTP " + str(status) + ": access denied or rate limited. Automatic retries stopped; review the site account/session and contact the provider if needed."
+                        if status == 429:
+                            reason = "HTTP 429 rate limit: crawl paused safely. The remaining queue is preserved; wait for the provider's retry window, then use Start / Resume."
+                        elif status == 401:
+                            reason = "HTTP 401 authentication required: crawl paused safely. Sign in again in the embedded browser, then use Start / Resume."
+                        else:
+                            reason = "HTTP 403 access denied: crawl paused safely. Check the account's access/permissions in the embedded browser; no automatic retry was attempted. The remaining queue is preserved."
                         self.library.save_failure(url, reason, depth)
+                        self.halt_reason = reason
                         self.emit("status", reason)
                         self.stop_event.set()
                         break
@@ -129,6 +136,7 @@ class Archiver:
                     }""")
                     page.wait_for_timeout(500)
                     asset_bodies = {}
+                    asset_capture_errors = 0
                     for asset_response in observed_responses:
                         try:
                             req = asset_response.request
@@ -140,8 +148,9 @@ class Archiver:
                             body = asset_response.body()
                             if body and len(body) <= MAX_RESOURCE_BYTES:
                                 asset_bodies[canonical(asset_response.url)] = (body, mime)
-                        except Exception as asset_error:
-                            self.emit("status", "Skipped one unavailable resource: " + str(asset_error)[:180])
+                        except Exception:
+                            # Chromium may discard response bodies after navigation; aggregate rather than flood the UI log.
+                            asset_capture_errors += 1
                     for asset_url, (body, mime) in asset_bodies.items():
                         resources[asset_url] = self.library.save_asset(asset_url, body, mime)
                     final_url = canonical(page.url) or url
@@ -214,6 +223,8 @@ class Archiver:
                     if soup.html:
                         soup.html["data-archive-source"] = final_url
                     notes = []
+                    if asset_capture_errors:
+                        notes.append(str(asset_capture_errors) + " browser response body/bodies were unavailable during capture; related resources may be missing")
                     if live_state.get("frames"): notes.append(str(len(live_state["frames"])) + " iframe(s) may need separate capture")
                     if live_state.get("api"): notes.append(str(len(live_state["api"])) + " fetch/XHR endpoint(s) detected; server-dependent features need offline validation")
                     if any(form.get("method", "get").lower() != "get" for form in live_state.get("forms", [])):
@@ -249,4 +260,9 @@ class Archiver:
                     self.stop_event.wait(interval)
                     remaining -= interval
             context.close()
-        self.emit("status", f"Run ended. Processed {done} pages; {len(queue)} remain queued for resume.")
+        if self.halt_reason:
+            self.emit("status", self.halt_reason + f" Processed {done} pages; {len(self.library.pending_queue())} pending pages remain available to resume.")
+        elif self.stop_event.is_set():
+            self.emit("status", f"Stopped safely. Processed {done} pages; {len(self.library.pending_queue())} pending pages remain available to resume.")
+        else:
+            self.emit("status", f"Run limit reached or queue empty. Processed {done} pages; {len(self.library.pending_queue())} pending pages remain available to resume.")
