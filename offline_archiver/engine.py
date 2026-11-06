@@ -94,9 +94,15 @@ class Archiver:
         async with async_playwright() as p:
             context = await self._launch(p)
             page = context.pages[0] if context.pages else await context.new_page()
-            # Refresh the embedded browser's matching-site cookies before each page.
-            # A manual re-authentication can therefore be picked up during a long crawl.
-            current_cookies = cookies
+            # Transfer the manually established embedded-browser session once, before
+            # crawling. Repeated cross-browser cookie synchronization was destabilizing
+            # the Playwright driver on long runs. To refresh authentication, pause/stop,
+            # sign in again in the embedded browser, then resume; the queue is durable.
+            if cookies:
+                try:
+                    await context.add_cookies(cookies)
+                except Exception as exc:
+                    self.emit("status", "Initial session-cookie import failed; public pages may still be saved: " + str(exc))
             while queue and not self.stop_event.is_set():
                 await self._wait_if_paused()
                 if self.stop_event.is_set():
@@ -104,20 +110,6 @@ class Archiver:
                 settings = live_options()
                 if done >= settings["max_pages"]:
                     break
-                if cookies_provider:
-                    try:
-                        current_cookies = cookies_provider()
-                    except Exception:
-                        pass
-                try:
-                    # The worker is isolated to this site. Replace its cookie jar with
-                    # the latest embedded-browser snapshot so removed/expired cookies
-                    # are not silently retained by a long-running capture context.
-                    await context.clear_cookies()
-                    if current_cookies:
-                        await context.add_cookies(current_cookies)
-                except Exception as exc:
-                    self.emit("status", "Some embedded-browser session cookies could not be synchronized: " + str(exc))
                 url, depth = queue.popleft()
                 self.library.set_queue_state(url, "running")
                 done += 1
@@ -309,8 +301,30 @@ class Archiver:
                     self.emit("page", saved, soup.title.get_text(" ", strip=True) if soup.title else final_url, final_url)
                     self.emit("status", f"Saved {done} pages in this run; {len(queue)} queued.")
                 except Exception as exc:
-                    self.library.save_failure(url, str(exc), depth)
-                    self.emit("failure", url, str(exc))
+                    error_text = str(exc)
+                    driver_lost = any(marker in error_text.lower() for marker in (
+                        "connection closed while reading from the driver",
+                        "browser has been closed",
+                        "target page, context or browser has been closed",
+                        "playwright connection closed",
+                        "transport is closed",
+                    ))
+                    if driver_lost:
+                        # This is an infrastructure interruption, not a bad page.
+                        # Keep the current item pending and stop this worker immediately;
+                        # Library startup also recovers any other running item.
+                        self.library.set_queue_state(
+                            url, "pending",
+                            "Browser driver disconnected; preserved for Start / Resume."
+                        )
+                        self.halt_reason = (
+                            "Browser driver disconnected. The current page and remaining "
+                            "queue were preserved; restart the download to continue."
+                        )
+                        self.emit("status", self.halt_reason)
+                        break
+                    self.library.save_failure(url, error_text, depth)
+                    self.emit("failure", url, error_text)
                 finally:
                     try:
                         page.remove_listener("response", on_response)
@@ -326,7 +340,10 @@ class Archiver:
                     interval = min(.2, current_delay - elapsed)
                     self.stop_event.wait(interval)
                     elapsed += interval
-            await context.close()
+            try:
+                await context.close()
+            except Exception:
+                pass
         if self.halt_reason:
             self.emit("status", self.halt_reason + f" Processed {done} pages; {len(self.library.pending_queue())} pending pages remain available to resume.")
         elif self.stop_event.is_set():
