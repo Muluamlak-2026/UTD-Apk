@@ -127,7 +127,8 @@ class Task(QThread):
         except Exception as exc:
             self.status.emit("Error: " + str(exc))
         finally:
-            self.status.emit("Task finished.")
+            if not self.engine.halt_reason:
+                self.status.emit("Task finished.")
 
     def stop(self):
         self.stop_event.set()
@@ -218,7 +219,7 @@ class Window(QMainWindow):
         form.addWidget(self.storage_btn,2,5)
         self.pages = QSpinBox(); self.pages.setRange(1,10000); self.pages.setValue(500)
         self.depth = QSpinBox(); self.depth.setRange(0,20); self.depth.setValue(0)
-        self.delay = QDoubleSpinBox(); self.delay.setRange(1,120); self.delay.setValue(5.0); self.delay.setSuffix(" sec")
+        self.delay = QDoubleSpinBox(); self.delay.setRange(3,120); self.delay.setValue(5.0); self.delay.setSuffix(" sec")
         form.addWidget(QLabel("Start URL"),0,0); form.addWidget(self.url,0,1,1,5)
         form.addWidget(QLabel("Max pages / run"),1,0); form.addWidget(self.pages,1,1)
         form.addWidget(QLabel("Link depth (0 = unlimited)"),1,2); form.addWidget(self.depth,1,3)
@@ -232,7 +233,7 @@ class Window(QMainWindow):
         self.progress=QProgressBar(); layout.addWidget(self.progress)
         self.start_btn.clicked.connect(self.start_crawl); self.pause_btn.clicked.connect(self.pause_task)
         self.stop_btn.clicked.connect(self.stop_task); self.finish_btn.clicked.connect(self.refresh_all)
-        note=QLabel("Safety: use one account session, low request rates, and only content you are permitted to save. Authentication errors and rate limits stop retries.")
+        note=QLabel("Safety: use one account session, low request rates, and only content you are permitted to save. HTTP 401/403/429 pauses the crawl safely and preserves the remaining queue; resolve the account or provider limit before resuming. Use a respectful delay between pages.")
         note.setWordWrap(True); note.setStyleSheet("color:#8a4b12;padding:8px")
         layout.addWidget(note); layout.addStretch()
         return w
