@@ -303,7 +303,12 @@ class Library:
                     for attr in ("src", "href", "poster"):
                         value = element.get(attr)
                         if value:
-                            target = resolve_asset(row["url"], value)
+                            if value.startswith("../assets/"):
+                                target = value[3:]
+                            elif value.startswith("assets/"):
+                                target = value
+                            else:
+                                target = resolve_asset(row["url"], value)
                             if target:
                                 element[attr] = relative(page_path, target)
                     srcset = element.get("srcset")
