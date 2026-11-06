@@ -9,6 +9,10 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
+# Enable a loopback-only Chromium DevTools endpoint before QtWebEngine starts.
+# The capture worker attaches to this same visible browser process/profile.
+os.environ.setdefault("QTWEBENGINE_REMOTE_DEBUGGING", "9222")
+
 from PySide6.QtCore import QThread, Signal, QUrl, Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import *
@@ -500,15 +504,8 @@ class Window(QMainWindow):
         url=self.url.text().strip()
         if not url.startswith(("http://","https://")):
             QMessageBox.warning(self,"URL","Enter a valid HTTP or HTTPS URL."); return
-        host=urlparse(url).hostname
-        cookies=self.browser.cookie_snapshot_for(host)
-        if not cookies:
-            answer=QMessageBox.question(self,"No matching browser cookies",
-                "No cookies for this site have been captured from the embedded browser. Continue only if the page is public or your session does not use cookies.")
-            if answer != QMessageBox.Yes: self.tabs.setCurrentIndex(0); return
         opts={"max_pages":self.pages.value(),"max_depth":self.depth.value(),"delay":self.delay.value(),
-              "cookies":cookies,"include_external":self.external_domains.isChecked(),
-              "cookies_provider":lambda: self.browser.cookie_snapshot_for(host)}
+              "include_external":self.external_domains.isChecked()}
         self.activate_site()
         self.task=Task(self.site_root,url,opts)
         task=self.task
