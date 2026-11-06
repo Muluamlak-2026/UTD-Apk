@@ -85,9 +85,11 @@ class Archiver:
         url = canonical(url)
         if not url:
             raise ValueError("Enter a valid HTTP or HTTPS URL.")
-        async with async_playwright() as p:
-            context = await self._launch(p)
-            page = context.pages[0] if context.pages else await context.new_page()
+        manager = await async_playwright().start()
+        p = manager
+        context = await self._launch(p)
+        page = context.pages[0] if context.pages else await context.new_page()
+        try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             self.emit("status", "Sign in manually in Edge. MFA/CAPTCHA remain interactive. Stop when finished.")
             while not self.stop_event.wait(.3):
@@ -141,16 +143,17 @@ class Archiver:
                 if done >= settings["max_pages"]:
                     break
                 url, depth = queue.popleft()
-                self.library.set_queue_state(url, "running")
                 done += 1
                 self.emit("progress", done, settings["max_pages"], url)
-                resources = {}
-                observed_responses = []
-                def on_response(response):
-                    # Keep callbacks lightweight; fetch response bodies later on this same async loop.
-                    observed_responses.append(response)
-                page.on("response", on_response)
-                try:
+                for attempt in range(1, 4):
+                    self.library.set_queue_state(url, "running", increment=(attempt < 3))
+                    resources = {}
+                    observed_responses = []
+                    def on_response(response):
+                        # Keep callbacks lightweight; fetch response bodies later on this same async loop.
+                        observed_responses.append(response)
+                    page.on("response", on_response)
+                    try:
                     response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     # User-requested consent handling: click only an explicit
                     # "Accept All" control before the snapshot is captured.
@@ -337,29 +340,53 @@ class Archiver:
                     self.emit("status", f"Saved {done} pages in this run; {len(queue)} queued.")
                 except Exception as exc:
                     error_text = str(exc)
-                    driver_lost = any(marker in error_text.lower() for marker in (
+                    lower_error = error_text.lower()
+                    driver_lost = any(marker in lower_error for marker in (
                         "connection closed while reading from the driver",
                         "browser has been closed",
                         "target page, context or browser has been closed",
                         "playwright connection closed",
                         "transport is closed",
+                        "browser has been closed",
                     ))
-                    if driver_lost:
-                        # This is an infrastructure interruption, not a bad page.
-                        # Keep the current item pending and stop this worker immediately;
-                        # Library startup also recovers any other running item.
+                    if attempt < 3:
                         self.library.set_queue_state(
-                            url, "pending",
-                            "Browser driver disconnected; preserved for Start / Resume."
+                            url, "running", error_text[:2000], increment=True
                         )
-                        self.halt_reason = (
-                            "Browser driver disconnected. The current page and remaining "
-                            "queue were preserved; restart the download to continue."
-                        )
-                        self.emit("status", self.halt_reason)
-                        break
+                        self.emit("status", f"Page attempt {attempt}/3 failed; preparing automatic retry: {error_text[:180]}")
+                        if driver_lost:
+                            # A disconnected Playwright transport cannot be reused.
+                            # Recreate both the Playwright manager and browser context.
+                            try:
+                                try:
+                                    await context.close()
+                                except Exception:
+                                    pass
+                                try:
+                                    await manager.stop()
+                                except Exception:
+                                    pass
+                                manager = await async_playwright().start()
+                                p = manager
+                                context = await self._launch(p)
+                                page = context.pages[0] if context.pages else await context.new_page()
+                                if cookies:
+                                    await context.add_cookies(cookies)
+                                self.emit("status", "Browser worker reconnected; resuming the interrupted page.")
+                            except Exception as reconnect_error:
+                                self.library.set_queue_state(
+                                    url, "pending",
+                                    "Automatic reconnect failed; page preserved: " + str(reconnect_error)[:1500]
+                                )
+                                self.halt_reason = "Browser reconnect failed; current page and queue were preserved for Start / Resume."
+                                self.emit("status", self.halt_reason)
+                                self.stop_event.set()
+                                break
+                        else:
+                            await asyncio.sleep(min(8, 1.5 * (2 ** (attempt - 1))))
+                        continue
                     self.library.save_failure(url, error_text, depth)
-                    self.emit("failure", url, error_text)
+                    self.emit("failure", url, f"Failed after 3 attempts: {error_text}")
                 finally:
                     try:
                         page.remove_listener("response", on_response)
@@ -377,6 +404,11 @@ class Archiver:
                     elapsed += interval
             try:
                 await context.close()
+            except Exception:
+                pass
+        finally:
+            try:
+                await manager.stop()
             except Exception:
                 pass
         if self.halt_reason:
