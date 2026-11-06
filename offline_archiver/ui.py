@@ -38,6 +38,7 @@ class EmbeddedBrowser(QWidget):
         self.profile.setCachePath(str(storage / "cache"))
         self.profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
         self.profile.cookieStore().cookieAdded.connect(self._cookie_added)
+        self.profile.cookieStore().cookieRemoved.connect(self._cookie_removed)
         self.profile.cookieStore().loadAllCookies()
 
         layout = QVBoxLayout(self)
@@ -98,6 +99,17 @@ class EmbeddedBrowser(QWidget):
             key = str((name, domain, path))
             with self._cookies_lock:
                 self.cookies[key] = item
+        except Exception:
+            pass
+
+    def _cookie_removed(self, cookie):
+        try:
+            name = bytes(cookie.name()).decode("utf-8", "replace")
+            domain = cookie.domain()
+            path = cookie.path() or "/"
+            key = str((name, domain, path))
+            with self._cookies_lock:
+                self.cookies.pop(key, None)
         except Exception:
             pass
 
@@ -263,6 +275,9 @@ class Window(QMainWindow):
         self.progress=QProgressBar(); layout.addWidget(self.progress)
         self.start_btn.clicked.connect(self.start_crawl); self.pause_btn.clicked.connect(self.pause_task)
         self.stop_btn.clicked.connect(self.stop_task); self.finish_btn.clicked.connect(self.refresh_all)
+        self.pages.valueChanged.connect(lambda value: self.update_live_option("max_pages", value))
+        self.depth.valueChanged.connect(lambda value: self.update_live_option("max_depth", value))
+        self.delay.valueChanged.connect(lambda value: self.update_live_option("delay", value))
         note=QLabel("Safety: use one account session, low request rates, and only content you are permitted to save. HTTP 401/403/429 pauses the crawl safely and preserves the remaining queue; resolve the account or provider limit before resuming. Use a respectful delay between pages.")
         note.setWordWrap(True); note.setStyleSheet("color:#8a4b12;padding:8px")
         layout.addWidget(note); layout.addStretch()
@@ -451,11 +466,6 @@ class Window(QMainWindow):
         self.activate_site()
         self.task=Task(self.site_root,url,opts)
         task=self.task
-        # These controls remain live during a run. Their values are read by the
-        # crawler between pages and during the inter-page delay; no restart needed.
-        self.pages.valueChanged.connect(lambda value, t=task: t.update_option("max_pages", value))
-        self.depth.valueChanged.connect(lambda value, t=task: t.update_option("max_depth", value))
-        self.delay.valueChanged.connect(lambda value, t=task: t.update_option("delay", value))
         task.status.connect(self.set_status)
         task.progress.connect(self.on_progress); task.page.connect(self.on_page)
         task.start(); self.set_status("Download started with the embedded-browser session.")
@@ -467,6 +477,11 @@ class Window(QMainWindow):
         if current.startswith(("http://", "https://")):
             self.url.setText(current)
         self.start_crawl()
+
+    def update_live_option(self, name, value):
+        if self.task and self.task.isRunning():
+            self.task.update_option(name, value)
+            self.set_status(f"Live crawler setting updated: {name} = {value}")
 
     def set_status(self,text):
         self.status.setText(text); self.log.appendPlainText(text)
