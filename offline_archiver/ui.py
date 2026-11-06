@@ -350,6 +350,7 @@ class Window(QMainWindow):
         split = QSplitter(Qt.Horizontal)
         self.topic_tree = QTreeWidget(); self.topic_tree.setHeaderLabel("Saved topics and bookmarks")
         self.reader = QWebEngineView(); self.reader.setPage(QWebEnginePage(self.browser.profile, self.reader))
+        self.reader.loadFinished.connect(self.clean_reader_cookie_overlay)
         split.addWidget(self.topic_tree); split.addWidget(self.reader); split.setStretchFactor(1, 3)
         layout.addWidget(split, 1)
         self.topic_tree.itemDoubleClicked.connect(self.open_topic_tree_item)
@@ -384,6 +385,41 @@ class Window(QMainWindow):
             item = QTreeWidgetItem([mark["title"] or mark["url"]])
             item.setData(0, Qt.UserRole, mark["url"]); bookmark_root.addChild(item)
         self.topic_tree.expandToDepth(1)
+
+    def clean_reader_cookie_overlay(self, ok=True):
+        """Hide stale consent dialogs in legacy snapshots without altering archive files."""
+        if not ok: return
+        script = r"""
+        (() => {
+          const norm = e => ((e.innerText || e.textContent || '') + ' ' +
+            (e.getAttribute('aria-label') || '')).replace(/\\s+/g, ' ').trim().toLowerCase();
+          const candidates = [...document.querySelectorAll(
+            '[role="dialog"],[aria-modal="true"],[id*="cookie" i],[class*="cookie" i],' +
+            '[id*="consent" i],[class*="consent" i],#onetrust-consent-sdk'
+          )];
+          for (const el of candidates) {
+            const text = norm(el);
+            if (!/(your privacy|cookie preferences|cookies)/i.test(text)) continue;
+            const controls = [...el.querySelectorAll('button,[role="button"],input')].map(norm).join(' ');
+            if (!/(accept|reject|manage|preferences)/i.test(controls)) continue;
+            // Remove the dialog and its full-screen backdrop when the wrapper is obvious.
+            let target = el;
+            for (let i=0; i<3 && target.parentElement; i++) {
+              const p = target.parentElement;
+              const pt = norm(p);
+              if (p.matches('[role="dialog"],[aria-modal="true"],#onetrust-consent-sdk') ||
+                  /cookie|consent|privacy/i.test((p.id || '') + ' ' + (p.className || ''))) target = p;
+              else break;
+            }
+            target.remove();
+          }
+          document.querySelectorAll('body').forEach(b => {
+            b.style.removeProperty('overflow');
+            b.style.removeProperty('position');
+          });
+        })();
+        """
+        self.reader.page().runJavaScript(script)
 
     def open_topic_tree_item(self, item, column=0):
         url = item.data(0, Qt.UserRole)
