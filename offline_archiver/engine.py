@@ -40,9 +40,9 @@ class Archiver:
         self.library = Library(data_dir / "library")
         self.halt_reason = None
 
-    def _wait_if_paused(self):
+    async def _wait_if_paused(self):
         while self.pause_event.is_set() and not self.stop_event.is_set():
-            time.sleep(.2)
+            await asyncio.sleep(.2)
 
     async def _launch(self, p):
         return await p.chromium.launch_persistent_context(
@@ -57,7 +57,7 @@ class Archiver:
             raise ValueError("Enter a valid HTTP or HTTPS URL.")
         async with async_playwright() as p:
             context = await self._launch(p)
-            page = context.pages[0] if context.pages else context.new_page()
+            page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             self.emit("status", "Sign in manually in Edge. MFA/CAPTCHA remain interactive. Stop when finished.")
             while not self.stop_event.wait(.3):
@@ -86,7 +86,7 @@ class Archiver:
                     self.emit("status", "Some browser cookies could not be synchronized: " + str(exc))
             page = context.pages[0] if context.pages else context.new_page()
             while queue and done < max_pages and not self.stop_event.is_set():
-                self._wait_if_paused()
+                await self._wait_if_paused()
                 if self.stop_event.is_set():
                     break
                 url, depth = queue.popleft()
@@ -96,8 +96,7 @@ class Archiver:
                 resources = {}
                 observed_responses = []
                 def on_response(response):
-                    # Defer Playwright calls until the normal synchronous worker flow.
-                    # Calling response.body() inside this callback can break the sync bridge.
+                    # Keep callbacks lightweight; fetch response bodies later on this same async loop.
                     observed_responses.append(response)
                 page.on("response", on_response)
                 try:
@@ -256,7 +255,7 @@ class Archiver:
                 # Delay is interruptible so Stop and Pause respond promptly.
                 remaining = max(1.0, min(delay, 120))
                 while remaining > 0 and not self.stop_event.is_set():
-                    self._wait_if_paused()
+                    await self._wait_if_paused()
                     interval = min(.2, remaining)
                     self.stop_event.wait(interval)
                     remaining -= interval
