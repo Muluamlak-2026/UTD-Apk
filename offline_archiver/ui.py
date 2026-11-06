@@ -477,6 +477,9 @@ class Window(QMainWindow):
         task=self.task
         task.status.connect(self.set_status)
         task.progress.connect(self.on_progress); task.page.connect(self.on_page)
+        task.finished.connect(self.on_task_finished)
+        self.pause_btn.setEnabled(True); self.resume_btn.setEnabled(False)
+        self.browser.pause_download.setEnabled(True); self.browser.resume_download.setEnabled(False)
         task.start(); self.set_status("Download started with the embedded-browser session.")
         self.browser.browser_status.setText("Archiving this site in the background. Your sign-in tab remains open.")
         self.tabs.setCurrentIndex(0)
@@ -504,6 +507,14 @@ class Window(QMainWindow):
         self.browser.browser_status.setText(f"Saved / processing {current} of {total}: {url[:120]}")
 
     def on_page(self,*_):
+        self.refresh_all()
+
+    def on_task_finished(self):
+        self.pause_btn.setEnabled(False)
+        self.browser.pause_download.setEnabled(False)
+        can_resume = bool(self.lib.pending_queue())
+        self.resume_btn.setEnabled(can_resume)
+        self.browser.resume_download.setEnabled(can_resume)
         self.refresh_all()
 
     def stop_task(self):
