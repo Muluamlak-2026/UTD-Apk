@@ -84,7 +84,7 @@ class Archiver:
                     self.emit("status", "Imported " + str(len(cookies)) + " session cookies from the embedded browser profile.")
                 except Exception as exc:
                     self.emit("status", "Some browser cookies could not be synchronized: " + str(exc))
-            page = context.pages[0] if context.pages else context.new_page()
+            page = context.pages[0] if context.pages else await context.new_page()
             while queue and done < max_pages and not self.stop_event.is_set():
                 await self._wait_if_paused()
                 if self.stop_event.is_set():
