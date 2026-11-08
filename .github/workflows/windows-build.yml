@@ -26,6 +26,8 @@ jobs:
         run: python -m compileall -q offline_archiver launcher.py
       - name: Test
         run: pytest -q
+      - name: Patch Playwright CDP defaults for Qt WebEngine
+        run: python -c "from offline_archiver.playwright_compat import ensure_cdp_download_compat; ensure_cdp_download_compat()"
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
       - name: Package compact Windows installer

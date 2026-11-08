@@ -20,6 +20,7 @@ from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from .engine import Archiver
+from .dashboard import publish_dashboard
 
 
 def home() -> Path:
@@ -448,14 +449,16 @@ class Window(QMainWindow):
         self.verify_btn=QPushButton("Verify archive integrity"); self.export_btn=QPushButton("Export portable ZIP")
         self.html_export_btn=QPushButton("Export standalone HTML folder")
         self.clear_data_btn=QPushButton("Clear history & downloaded data…")
-        self.open_archive_btn=QPushButton("Open archive folder"); self.report_btn=QPushButton("Save diagnostic report")
-        for b in (self.verify_btn,self.export_btn,self.html_export_btn,self.open_archive_btn,self.report_btn,self.clear_data_btn): buttons.addWidget(b)
+        self.open_archive_btn=QPushButton("Open archive folder"); self.index_btn=QPushButton("Open searchable offline index")
+        self.report_btn=QPushButton("Save diagnostic report")
+        for b in (self.verify_btn,self.export_btn,self.html_export_btn,self.open_archive_btn,self.index_btn,self.report_btn,self.clear_data_btn): buttons.addWidget(b)
         layout.addLayout(buttons)
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setPlaceholderText("Recent activity and diagnostics"); layout.addWidget(self.log,1)
         self.verify_btn.clicked.connect(self.verify_library); self.export_btn.clicked.connect(self.export)
         self.html_export_btn.clicked.connect(self.export_html_folder)
         self.clear_data_btn.clicked.connect(self.clear_history_and_data)
         self.open_archive_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.site_root / "library"))))
+        self.index_btn.clicked.connect(self.open_searchable_index)
         self.report_btn.clicked.connect(self.save_report)
         return w
 
@@ -542,6 +545,19 @@ class Window(QMainWindow):
 
     def on_page(self,*_):
         self.refresh_all()
+        self.publish_searchable_index()
+
+    def publish_searchable_index(self):
+        try:
+            publish_dashboard(self.lib, self.site_root / "index.html")
+        except Exception as exc:
+            self.set_status("Offline index update failed: " + str(exc)[:240])
+
+    def open_searchable_index(self):
+        self.publish_searchable_index()
+        path = self.site_root / "index.html"
+        if path.is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
 
     def on_task_finished(self):
         self.pause_btn.setEnabled(False)
@@ -550,6 +566,7 @@ class Window(QMainWindow):
         self.resume_btn.setEnabled(can_resume)
         self.browser.resume_download.setEnabled(can_resume)
         self.refresh_all()
+        self.publish_searchable_index()
 
     def stop_task(self):
         if self.task and self.task.isRunning():

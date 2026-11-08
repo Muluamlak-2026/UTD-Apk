@@ -200,7 +200,7 @@ class Library:
     def list_pages(self, limit=1000):
         with self.lock:
             rows = self.db.execute(
-                "SELECT id,title,url,html_path,state,status,saved_at,completeness,completeness_notes FROM pages ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT id,title,url,html_path,state,status,saved_at,completeness,completeness_notes,text,depth,sha256 FROM pages ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(x) for x in rows]
 

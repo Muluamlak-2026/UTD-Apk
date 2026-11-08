@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 from .store import Library
+from .playwright_compat import ensure_cdp_download_compat
 
 
 MAX_RESOURCE_BYTES = 30 * 1024 * 1024
@@ -122,6 +123,9 @@ class Archiver:
             }
 
         async def attach_visible_browser():
+            # Qt WebEngine rejects Browser.setDownloadBehavior. Ensure Playwright's
+            # CDP default context keeps the browser's native download policy.
+            ensure_cdp_download_compat()
             # Attach Playwright to Qt WebEngine's existing Chromium process over
             # localhost CDP. This is the same visible page/profile the user signed
             # into; no headless browser, cloned cookies, or second login is used.
