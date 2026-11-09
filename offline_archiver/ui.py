@@ -21,6 +21,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from .engine import Archiver
 from .dashboard import publish_dashboard
+from .legacy_import import import_legacy_archive
 
 
 def home() -> Path:
@@ -190,14 +191,26 @@ class Window(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Offline Archiver")
-        self.resize(1480, 940)
+        self.resize(1180, 780)
+        self.setMinimumSize(900, 620)
         self.app_dir = home()
         self.site_map_path = self.app_dir / "site-storage.json"
         self.site_root = self._site_root_for("https://www.uptodate.com")
         self.lib = Archiver(self.site_root, lambda *a: None, threading.Event(), threading.Event()).library
         self.task: Task | None = None
         self._build_ui()
+        self._import_legacy_archive()
         self.refresh_all()
+
+    def _import_legacy_archive(self):
+        try:
+            result = import_legacy_archive(self.site_root, self.lib)
+            if result.get("status") not in {"not_found", "unchanged"}:
+                self.set_status(result.get("message", "Legacy archive checked."))
+                for error in result.get("errors", [])[:5]:
+                    self.log.appendPlainText("Legacy import warning: " + error)
+        except Exception as exc:
+            self.set_status("Legacy archive import could not complete; original files were preserved: " + str(exc)[:240])
 
     def _build_ui(self):
         root = QWidget()
@@ -480,6 +493,7 @@ class Window(QMainWindow):
         self.site_root.mkdir(parents=True, exist_ok=True)
         self.lib = Archiver(self.site_root, lambda *a: None, threading.Event(), threading.Event()).library
         self.storage_label.setText(str(self.site_root))
+        self._import_legacy_archive()
         self.refresh_all()
         self.set_status("Switched to this site's independent archive and queue.")
 
@@ -498,6 +512,7 @@ class Window(QMainWindow):
         self.site_root.mkdir(parents=True, exist_ok=True)
         self.lib = Archiver(self.site_root, lambda *a: None, threading.Event(), threading.Event()).library
         self.storage_label.setText(str(self.site_root))
+        self._import_legacy_archive()
         self.refresh_all()
         self.set_status("Selected independent storage folder for " + host)
 
