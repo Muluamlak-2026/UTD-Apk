@@ -482,7 +482,21 @@ class Window(QMainWindow):
             mapping = json.loads(self.site_map_path.read_text(encoding="utf-8")) if self.site_map_path.exists() else {}
         except Exception:
             mapping = {}
-        return Path(mapping.get(host) or (self.app_dir / "sites" / safe))
+        configured = mapping.get(host)
+        if configured:
+            return Path(configured)
+        # Adopt the legacy add-on's conventional Downloads folder on first launch.
+        # Only select it when its manifest exists; never guess or overwrite a folder.
+        downloads = Path.home() / "Downloads" / "OfflineSiteSaver"
+        candidates = [
+            downloads / host,
+            downloads / safe,
+            downloads / "www.uptodate.com" if host.endswith("uptodate.com") else downloads / safe,
+        ]
+        for candidate in candidates:
+            if (candidate / "archive-manifest.json").is_file():
+                return candidate
+        return self.app_dir / "sites" / safe
 
     def activate_site(self):
         url = self.url.text().strip()
