@@ -1,5 +1,5 @@
 # Qt Essentials provides QtCore, QtGui and QtWidgets only.
 # Do not install the PySide6 meta-package: it pulls WebEngine, PDF and other large modules.
-PySide6-Essentials>=6.7,<7
-playwright>=1.48,<2
+PySide6>=6.7,<7
+playwright==1.48.0
 beautifulsoup4>=4.12,<5

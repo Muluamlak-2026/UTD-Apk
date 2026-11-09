@@ -8,7 +8,9 @@ import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, urldefrag
+import posixpath
+import re
 
 from bs4 import BeautifulSoup
 
@@ -34,17 +36,23 @@ class Library:
                 CREATE TABLE IF NOT EXISTS pages(
                     id INTEGER PRIMARY KEY, url TEXT UNIQUE, requested_url TEXT, title TEXT,
                     html_path TEXT, text TEXT, status INTEGER, depth INTEGER, state TEXT,
-                    error TEXT, saved_at TEXT, sha256 TEXT
+                    error TEXT, saved_at TEXT, sha256 TEXT, completeness TEXT DEFAULT 'unknown', completeness_notes TEXT DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS links(source_id INTEGER, target_url TEXT);
                 CREATE TABLE IF NOT EXISTS assets(url TEXT PRIMARY KEY, path TEXT, sha256 TEXT, mime TEXT, size INTEGER);
                 CREATE TABLE IF NOT EXISTS failures(id INTEGER PRIMARY KEY, url TEXT, error TEXT, depth INTEGER, created TEXT);
+                CREATE TABLE IF NOT EXISTS bookmarks(url TEXT PRIMARY KEY, title TEXT, created TEXT);
                 CREATE TABLE IF NOT EXISTS crawl_queue(
                     id INTEGER PRIMARY KEY, url TEXT UNIQUE, depth INTEGER, state TEXT DEFAULT 'pending',
                     attempts INTEGER DEFAULT 0, error TEXT, updated TEXT
                 );
                 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(title, text);
             """)
+            page_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(pages)")}
+            if "completeness" not in page_columns:
+                self.db.execute("ALTER TABLE pages ADD COLUMN completeness TEXT DEFAULT 'unknown'")
+            if "completeness_notes" not in page_columns:
+                self.db.execute("ALTER TABLE pages ADD COLUMN completeness_notes TEXT DEFAULT ''")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_queue_state ON crawl_queue(state,id)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_pages_state ON pages(state,id)")
             # A process crash can leave a queue item marked running; safely retry it.
@@ -127,7 +135,8 @@ class Library:
         with self.lock:
             return {r["url"]: r["path"] for r in self.db.execute("SELECT url,path FROM assets")}
 
-    def save_page(self, url, requested_url, title, html, text, status, depth, links):
+    def save_page(self, url, requested_url, title, html, text, status, depth, links,
+                  completeness="unknown", completeness_notes=""):
         digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
         with self.lock:
             row = self.db.execute("SELECT id FROM pages WHERE url=?", (url,)).fetchone()
@@ -144,8 +153,9 @@ class Library:
             (self.pages_dir / filename).write_text(html, encoding="utf-8")
             self.db.execute(
                 """UPDATE pages SET requested_url=?,title=?,html_path=?,text=?,status=?,depth=?,
-                   state='saved',error=NULL,saved_at=?,sha256=? WHERE id=?""",
-                (requested_url, title, "pages/" + filename, text, status, depth, self.now(), digest, pid),
+                   state='saved',error=NULL,saved_at=?,sha256=?,completeness=?,completeness_notes=? WHERE id=?""",
+                (requested_url, title, "pages/" + filename, text, status, depth, self.now(), digest,
+                 completeness, completeness_notes[:4000], pid),
             )
             self.db.execute("DELETE FROM links WHERE source_id=?", (pid,))
             self.db.executemany("INSERT INTO links VALUES(?,?)", [(pid, x) for x in links])
@@ -190,7 +200,7 @@ class Library:
     def list_pages(self, limit=1000):
         with self.lock:
             rows = self.db.execute(
-                "SELECT id,title,url,html_path,state,status,saved_at FROM pages ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT id,title,url,html_path,state,status,saved_at,completeness,completeness_notes,text,depth,sha256 FROM pages ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(x) for x in rows]
 
@@ -224,45 +234,219 @@ class Library:
                     problems.append(f"Hash mismatch: {row['path']}")
         return problems
 
+    @staticmethod
+    def _url_key(url):
+        if not url:
+            return ""
+        return urldefrag(url.strip())[0]
+
+    @staticmethod
+    def _portable_page_path(url, page_id):
+        parsed = urlparse(url)
+        host = (parsed.hostname or "unknown-host").lower()
+        host = re.sub(r"[^a-z0-9.-]+", "_", host)
+        parts = [p for p in parsed.path.split("/") if p]
+        safe_parts = [re.sub(r"[^A-Za-z0-9._-]+", "_", p)[:80] or "item" for p in parts]
+        if not safe_parts or parsed.path.endswith("/"):
+            safe_parts.append("index")
+        leaf = safe_parts[-1]
+        if "." in leaf:
+            stem, ext = leaf.rsplit(".", 1)
+            safe_parts[-1] = f"{stem[:60]}-{page_id:08d}.{ext[:12]}"
+        else:
+            safe_parts[-1] = f"{leaf[:60]}-{page_id:08d}.html"
+        return "pages/" + host + "/" + "/".join(safe_parts)
+
     def export_zip(self, destination):
+        """Create a portable archive with URL-derived paths and rewritten local dependencies."""
         with self.lock:
             rows = [dict(r) for r in self.db.execute(
-                "SELECT id,url,title,html_path FROM pages ORDER BY title COLLATE NOCASE"
+                "SELECT id,url,requested_url,title,html_path FROM pages ORDER BY title COLLATE NOCASE"
             ).fetchall()]
-            assets = [dict(r) for r in self.db.execute("SELECT url,path FROM assets").fetchall()]
-        local = {r["url"]: Path(r["html_path"]).name for r in rows}
-        asset_local = {r["url"]: r["path"] for r in assets}
+            assets = [dict(r) for r in self.db.execute("SELECT url,path,mime FROM assets").fetchall()]
+
+        page_paths = {}
+        for row in rows:
+            target = self._portable_page_path(row["url"], row["id"])
+            page_paths[self._url_key(row["url"])] = target
+            if row.get("requested_url"):
+                page_paths.setdefault(self._url_key(row["requested_url"]), target)
+        asset_paths = {self._url_key(a["url"]): a["path"] for a in assets}
+        asset_by_url = {self._url_key(a["url"]): a for a in assets}
+
+        def relative(source_path, target_path):
+            return posixpath.relpath(target_path, posixpath.dirname(source_path) or ".")
+
+        def resolve_page(base_url, value):
+            absolute = self._url_key(urljoin(base_url, value))
+            return page_paths.get(absolute)
+
+        def resolve_asset(base_url, value):
+            absolute = self._url_key(urljoin(base_url, value))
+            return asset_paths.get(absolute)
+
         with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            # Rewrite HTML references relative to each exported page's actual directory.
             for row in rows:
                 source = self.root / row["html_path"]
+                page_path = page_paths[self._url_key(row["url"])]
                 soup = BeautifulSoup(source.read_text(encoding="utf-8", errors="replace"), "html.parser")
-                for a in soup.select("a[href]"):
-                    target = a.get("href", "")
-                    if target in local:
-                        a["href"] = local[target]
-                for el in soup.select("[src],link[href],source[src],video[poster]"):
+                for element in soup.select("a[href],area[href]"):
+                    value = element.get("href", "")
+                    target = resolve_page(row["url"], value)
+                    if target:
+                        suffix = ""
+                        if "#" in value:
+                            suffix = "#" + value.split("#", 1)[1]
+                        element["href"] = relative(page_path, target) + suffix
+                for element in soup.select("[src],link[href],source[src],video[poster],audio[src],script[src]"):
                     for attr in ("src", "href", "poster"):
-                        value = el.get(attr)
-                        if value in asset_local:
-                            el[attr] = "../" + asset_local[value]
-                z.writestr(row["html_path"], str(soup))
-            for folder in (self.assets_dir,):
-                for f in folder.rglob("*"):
-                    if f.is_file():
-                        z.write(f, f.relative_to(self.root))
+                        value = element.get(attr)
+                        if value:
+                            if value.startswith("../assets/"):
+                                target = value[3:]
+                            elif value.startswith("assets/"):
+                                target = value
+                            else:
+                                target = resolve_asset(row["url"], value)
+                            if target:
+                                element[attr] = relative(page_path, target)
+                    srcset = element.get("srcset")
+                    if srcset:
+                        rewritten = []
+                        for candidate in srcset.split(","):
+                            bits = candidate.strip().split()
+                            if bits:
+                                target = resolve_asset(row["url"], bits[0])
+                                if target:
+                                    bits[0] = relative(page_path, target)
+                                rewritten.append(" ".join(bits))
+                        element["srcset"] = ", ".join(rewritten)
+                for element in soup.select("[style]"):
+                    style = element.get("style", "")
+                    def replace_inline(match):
+                        raw = match.group(1).strip().strip("\\\"'")
+                        target = resolve_asset(row["url"], raw)
+                        return "url('" + (relative(page_path, target) if target else raw) + "')"
+                    element["style"] = re.sub(r"url[(]\s*[\x22\x27]?(.*?)[\x22\x27]?\s*[)]", replace_inline, style, flags=re.I)
+                z.writestr(page_path, str(soup))
+
+            # CSS assets can themselves reference fonts and images; rewrite those too.
+            for asset in assets:
+                source = self.root / asset["path"]
+                if not source.is_file():
+                    continue
+                output = source.read_bytes()
+                if (asset.get("mime") or "").split(";", 1)[0].lower() == "text/css":
+                    try:
+                        css = output.decode("utf-8", errors="replace")
+                        css_path = asset["path"]
+                        def replace_css(match):
+                            raw = match.group(1).strip().strip("\\\"'")
+                            if raw.startswith(("data:", "blob:", "#")):
+                                return match.group(0)
+                            absolute = self._url_key(urljoin(asset["url"], raw))
+                            target = asset_paths.get(absolute)
+                            return "url('" + (relative(css_path, target) if target else raw) + "')"
+                        css = re.sub(r"url[(]\s*[\x22\x27]?(.*?)[\x22\x27]?\s*[)]", replace_css, css, flags=re.I)
+                        output = css.encode("utf-8")
+                    except Exception:
+                        pass
+                z.writestr(asset["path"], output)
+
             links = []
             for row in rows:
+                target = page_paths[self._url_key(row["url"])]
                 label = (row["title"] or row["url"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                links.append(f'<li><a href="pages/{local[row["url"]]}">{label}</a><small> — {row["url"]}</small></li>')
+                links.append(f'<li><a href="{target}">{label}</a><small> — {row["url"]}</small></li>')
             index = (
-                "<!doctype html><html><head><meta charset='utf-8'><title>Offline Archiver Library</title>"
-                "<style>body{font:16px Segoe UI,Arial;max-width:1000px;margin:40px auto;padding:0 20px;color:#172b4d}"
-                "li{margin:12px 0}small{color:#667085}</style></head><body><h1>Offline Archiver Library</h1>"
-                "<p>Portable snapshot. Dynamic server features may not work offline.</p><ol>"
-                + "".join(links) + "</ol></body></html>"
+                "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>Offline Archiver Library</title><style>body{font:16px Segoe UI,Arial;max-width:1100px;margin:40px auto;padding:0 20px;color:#172b4d}"
+                "li{margin:12px 0}small{color:#667085;display:block}input{width:100%;padding:12px;box-sizing:border-box}</style></head><body>"
+                "<h1>Offline Archiver Library</h1><p>Portable snapshot. Server-dependent functions may not work offline.</p>"
+                "<input id='q' type='search' placeholder='Filter saved pages by title or URL'><ol id='pages'>"
+                + "".join(links) + "</ol><script>const q=document.getElementById('q');q.addEventListener('input',()=>{const v=q.value.toLowerCase();"
+                "document.querySelectorAll('#pages li').forEach(x=>x.hidden=!x.textContent.toLowerCase().includes(v));});</script></body></html>"
             )
             z.writestr("index.html", index)
             z.writestr("manifest.json", json.dumps({
-                "format": "OfflineArchiverPortable", "version": 2, "generated": self.now(),
+                "format": "OfflineArchiverPortable", "version": 3, "generated": self.now(),
                 "pages": len(rows), "assets": len(assets)
             }, indent=2))
+
+    def list_bookmarks(self):
+        with self.lock:
+            return [dict(r) for r in self.db.execute("SELECT url,title,created FROM bookmarks ORDER BY title COLLATE NOCASE").fetchall()]
+
+    def toggle_bookmark(self, url, title):
+        with self.lock, self.db:
+            exists = self.db.execute("SELECT 1 FROM bookmarks WHERE url=?", (url,)).fetchone()
+            if exists:
+                self.db.execute("DELETE FROM bookmarks WHERE url=?", (url,))
+                return False
+            self.db.execute("INSERT INTO bookmarks(url,title,created) VALUES(?,?,?)", (url, title, self.now()))
+            return True
+
+    def clear_history_and_data(self):
+        """Delete archive contents and crawl history; preserve embedded-browser sign-in data."""
+        with self.lock, self.db:
+            for table in ("links","pages_fts","pages","assets","failures","crawl_queue","bookmarks","sites"):
+                self.db.execute("DELETE FROM " + table)
+        for folder in (self.pages_dir, self.assets_dir):
+            if folder.exists():
+                import shutil
+                for item in folder.iterdir():
+                    if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
+                    else: item.unlink(missing_ok=True)
+        self.pages_dir.mkdir(parents=True, exist_ok=True)
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
+
+    def export_html_folder(self, destination):
+        """Export portable HTML pages, local assets, and a searchable index as a folder."""
+        import tempfile
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / "portable.zip"
+            self.export_zip(archive)
+            with zipfile.ZipFile(archive, "r") as z:
+                z.extractall(destination)
+        return destination
+
+    def queue_items(self, state=None, limit=5000):
+        with self.lock:
+            if state and state != "all":
+                rows = self.db.execute("SELECT url,depth,state,attempts,error,updated FROM crawl_queue WHERE state=? ORDER BY id DESC LIMIT ?", (state, limit)).fetchall()
+            else:
+                rows = self.db.execute("SELECT url,depth,state,attempts,error,updated FROM crawl_queue ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def queue_stats(self):
+        with self.lock:
+            counts = {r["state"]: r["n"] for r in self.db.execute("SELECT state,COUNT(*) n FROM crawl_queue GROUP BY state")}
+            counts["downloaded"] = self.db.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+            counts["assets"] = self.db.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+            counts["failures"] = self.db.execute("SELECT COUNT(*) FROM failures").fetchone()[0]
+            counts["incomplete"] = self.db.execute("SELECT COUNT(*) FROM pages WHERE completeness IN ('partial','incomplete')").fetchone()[0]
+            counts["attempted"] = self.db.execute("SELECT COUNT(*) FROM crawl_queue WHERE attempts>0 OR state!='pending'").fetchone()[0]
+            counts["redownloaded"] = self.db.execute("SELECT COUNT(*) FROM pages WHERE requested_url!=url").fetchone()[0]
+        return counts
+
+    def retry_incomplete(self):
+        with self.lock, self.db:
+            rows = self.db.execute("SELECT url,depth FROM pages WHERE completeness IN ('partial','incomplete')").fetchall()
+            for row in rows:
+                self.db.execute(
+                    "INSERT INTO crawl_queue(url,depth,state,attempts,error,updated) VALUES(?,?,'pending',0,NULL,?) "
+                    "ON CONFLICT(url) DO UPDATE SET depth=excluded.depth,state='pending',error=NULL,updated=excluded.updated",
+                    (row["url"], row["depth"], self.now())
+                )
+            return len(rows)
+
+    def add_url(self, url, depth=0):
+        return self.enqueue(url, depth)
+
+    def force_redownload(self, url, depth=0):
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO crawl_queue(url,depth,state,attempts,error,updated) VALUES(?,?,'pending',0,NULL,?) ON CONFLICT(url) DO UPDATE SET depth=excluded.depth,state='pending',error=NULL,updated=excluded.updated", (url, depth, self.now()))
+            return True
